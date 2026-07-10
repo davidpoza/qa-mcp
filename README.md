@@ -18,3 +18,20 @@ La generación E2E incluye baseline autocapturable de snapshots genéricos (API/
 
 En `cypress.config.js`, registra esas tareas desde `setupNodeEvents(on)`:
 `const { registerBaselineTasks } = require('./cypress/support/baseline-tasks'); registerBaselineTasks(on);`
+
+## Configuración en VS Code Copilot (MCP)
+
+En VS Code, abre **MCP: Open User Configuration** y añade:
+
+```json
+{
+    "servers": {
+        "qa-mcp": {
+            "type": "stdio",
+            "command": "C:\\Program Files\\nodejs\\node.exe",
+            "args": ["dist/index.js"],
+            "cwd": "C:\\EnvAena\\workspace\\qa-mcp"
+        }
+    }
+}
+```
