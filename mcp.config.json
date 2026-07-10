@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "backend": {
+    "root": "./backend",
+    "language": "java",
+    "build": "maven"
+  },
+  "frontend": {
+    "root": "./frontend",
+    "framework": "angular",
+    "e2e": "cypress"
+  },
+  "openApi": "./backend/openapi.yaml",
+  "requirements": "./docs/rf-cu.md",
+  "prompts": {
+    "e2e": "./prompts/e2e.md"
+  },
+  "restTests": "./backend/src/test/java",
+  "e2eTests": "./frontend/cypress/e2e",
+  "evidence": {
+    "excelTemplate": "./templates/evidences.xlsx",
+    "wordTemplate": "./templates/ETP.docx",
+    "output": "./output"
+  }
+}

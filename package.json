@@ -1,0 +1,22 @@
+{
+  "name": "qa-mcp",
+  "version": "0.1.0",
+  "description": "MCP para generar tests (Rest Assured/Cypress) y exportar ETP en Excel/Word.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "docx": "^9.5.1",
+    "exceljs": "^4.4.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
