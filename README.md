@@ -12,6 +12,8 @@ Para `generateE2ETests`, puedes definir un prompt único en `prompts/e2e.md` (co
 También puedes pasar `promptOverride` en la invocación de la tool para ajustar una ejecución puntual.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
+- asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`
+- asegura `cypress.config.js` y registra `registerBaselineTasks(on)` en `setupNodeEvents`
 - crea `cypress/support/e2e-baseline.js`
 - crea `cypress/fixtures/e2e-baseline.json`
 - crea `cypress/support/baseline-tasks.js` con tareas `readBaseline` y `writeBaseline`

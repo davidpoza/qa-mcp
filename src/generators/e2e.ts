@@ -288,10 +288,115 @@ async function writeBaselineAssets(context: LoadedContext): Promise<void> {
   await fs.writeFile(tasksSnippetPath, buildBaselineTasksSnippetFile(), "utf8");
 }
 
+async function readTextIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function buildDefaultCypressConfigFile(): string {
+  return [
+    "const { defineConfig } = require(\"cypress\");",
+    "const { registerBaselineTasks } = require(\"./cypress/support/baseline-tasks\");",
+    "",
+    "module.exports = defineConfig({",
+    "  e2e: {",
+    "    specPattern: \"cypress/e2e/**/*.cy.{js,ts}\",",
+    "    setupNodeEvents(on) {",
+    "      registerBaselineTasks(on);",
+    "    }",
+    "  },",
+    "  video: false",
+    "});",
+    "",
+  ].join("\n");
+}
+
+function injectBaselineTasksIntoConfig(configContent: string): string {
+  let updated = configContent;
+  const hasRequire =
+    updated.includes("registerBaselineTasks") &&
+    (updated.includes("./cypress/support/baseline-tasks") || updated.includes(".\\\\cypress\\\\support\\\\baseline-tasks"));
+
+  if (!hasRequire) {
+    updated = `const { registerBaselineTasks } = require("./cypress/support/baseline-tasks");\n${updated}`;
+  }
+
+  if (updated.includes("registerBaselineTasks(on);")) {
+    return updated;
+  }
+
+  const setupNodeEventsRegex = /setupNodeEvents\s*\(\s*on(?:\s*,[^)]*)?\s*\)\s*\{/;
+  if (setupNodeEventsRegex.test(updated)) {
+    return updated.replace(setupNodeEventsRegex, (match) => `${match}\n      registerBaselineTasks(on);`);
+  }
+
+  return updated;
+}
+
+async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void> {
+  const configRoot = path.dirname(context.configPath);
+  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
+  const packageJsonPath = path.resolve(frontendRoot, "package.json");
+  const cypressConfigPath = path.resolve(frontendRoot, "cypress.config.js");
+
+  await fs.mkdir(frontendRoot, { recursive: true });
+
+  const packageJsonRaw = await readTextIfExists(packageJsonPath);
+  const packageJson = packageJsonRaw
+    ? (JSON.parse(packageJsonRaw) as Record<string, unknown>)
+    : {
+        name: path.basename(frontendRoot) || "frontend",
+        private: true,
+        version: "0.0.0",
+      };
+
+  const scripts =
+    typeof packageJson.scripts === "object" && packageJson.scripts !== null
+      ? (packageJson.scripts as Record<string, string>)
+      : {};
+  if (!scripts["e2e"]) {
+    scripts["e2e"] = "cypress run";
+  }
+  if (!scripts["e2e:open"]) {
+    scripts["e2e:open"] = "cypress open";
+  }
+  packageJson.scripts = scripts;
+
+  const devDependencies =
+    typeof packageJson.devDependencies === "object" && packageJson.devDependencies !== null
+      ? (packageJson.devDependencies as Record<string, string>)
+      : {};
+  if (!devDependencies.cypress) {
+    devDependencies.cypress = "^13.17.0";
+  }
+  packageJson.devDependencies = devDependencies;
+
+  await fs.writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
+
+  const existingConfig = await readTextIfExists(cypressConfigPath);
+  if (!existingConfig) {
+    await fs.writeFile(cypressConfigPath, buildDefaultCypressConfigFile(), "utf8");
+    return;
+  }
+
+  const updatedConfig = injectBaselineTasksIntoConfig(existingConfig);
+  if (updatedConfig !== existingConfig) {
+    await fs.writeFile(cypressConfigPath, updatedConfig, "utf8");
+  }
+}
+
 export async function generateE2ETests(
   context: LoadedContext,
   promptOverride?: string
 ): Promise<{ files: string[]; rfCount: number }> {
+  await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
