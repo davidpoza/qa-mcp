@@ -16,6 +16,7 @@ const configSchema = z.object({
     e2e: z.string().min(1),
   }),
   openApi: z.string().min(1),
+  appRouting: z.string().min(1).optional(),
   requirements: z.string().min(1).optional(),
   restTests: z.string().min(1),
   e2eTests: z.string().min(1),
@@ -53,13 +54,37 @@ export async function loadContext(configPathInput?: string): Promise<LoadedConte
     ? path.resolve(process.cwd(), configPathInput)
     : path.resolve(process.cwd(), "mcp.config.json");
 
-  const rawConfig = await fs.readFile(configPath, "utf8");
+  let rawConfig: string;
+  try {
+    rawConfig = await fs.readFile(configPath, "utf8");
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") {
+      throw new Error(
+        `No se encontró mcp.config.json en ${configPath}. ` +
+          "Revisa el cwd configurado para el servidor MCP en VS Code."
+      );
+    }
+    throw error;
+  }
   const parsed = JSON.parse(rawConfig);
   const config = configSchema.parse(parsed) as McpQaConfig;
   const configDir = path.dirname(configPath);
 
   const openApiPath = absoluteFrom(configDir, config.openApi);
-  const openApiContent = await fs.readFile(openApiPath, "utf8");
+  let openApiContent: string;
+  try {
+    openApiContent = await fs.readFile(openApiPath, "utf8");
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code === "ENOENT") {
+      throw new Error(
+        `No se encontró openapi.yaml en ${openApiPath}. ` +
+          `Config usada: ${configPath}. Valor openApi: ${config.openApi}`
+      );
+    }
+    throw error;
+  }
 
   let requirementsPath: string | undefined;
   let requirementsContent: string | undefined;

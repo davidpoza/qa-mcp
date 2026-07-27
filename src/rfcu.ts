@@ -152,8 +152,19 @@ export function renderRfCu(entries: RfEntry[], sourceOpenApi: string, sourceFron
   return `${lines.join("\n").trim()}\n`;
 }
 
-async function tryReadRoutes(frontendRoot: string): Promise<string[]> {
-  const routingPath = path.join(frontendRoot, "src", "app", "app-routing.module.ts");
+function resolveRoutingPath(context: LoadedContext): string {
+  const configRoot = path.dirname(context.configPath);
+  if (context.config.appRouting) {
+    if (path.isAbsolute(context.config.appRouting)) {
+      return context.config.appRouting;
+    }
+    return path.resolve(configRoot, context.config.appRouting);
+  }
+  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
+  return path.join(frontendRoot, "src", "app", "app-routing.module.ts");
+}
+
+async function tryReadRoutes(routingPath: string): Promise<string[]> {
   try {
     const content = await fs.readFile(routingPath, "utf8");
     const matches = [...content.matchAll(/path:\s*['"`]([^'"`]+)['"`]/g)];
@@ -180,9 +191,9 @@ export async function autoCompleteRfCu(context: LoadedContext, requirementsPathO
     : context.requirementsPath ?? path.resolve(path.dirname(context.configPath), "docs", "rf-cu.md");
 
   const sourceOpenApi = context.openApiPath;
-  const sourceFront = path.join(path.resolve(path.dirname(context.configPath), context.config.frontend.root), "src");
-  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
-  const routes = await tryReadRoutes(frontendRoot);
+  const routingPath = resolveRoutingPath(context);
+  const sourceFront = routingPath;
+  const routes = await tryReadRoutes(routingPath);
 
   let entries: RfEntry[] = [];
   const existing = await readTextIfExists(outputPath);
@@ -220,4 +231,3 @@ export function extractOrBuildRfEntries(context: LoadedContext): RfEntry[] {
   }
   return ensureCasesAndSteps(fallbackRfFromRoutes([]));
 }
-

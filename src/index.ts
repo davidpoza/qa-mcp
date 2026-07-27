@@ -51,11 +51,10 @@ registerToolCompat(
   "autoCompleteRfCu",
   "Completa RF/CU/pasos en rf-cu.md según formato requerido.",
   {
-    configPath: z.string().optional(),
     requirementsPath: z.string().optional(),
   },
-  async ({ configPath, requirementsPath }) => {
-    const context = await loadContext(configPath);
+  async ({ requirementsPath }) => {
+    const context = await loadContext();
     const result = await autoCompleteRfCu(context, requirementsPath);
     return asToolResult(`rf-cu actualizado en ${result.outputPath} con ${result.count} RF.`);
   }
@@ -65,11 +64,9 @@ registerToolCompat(
   server,
   "generateRestTests",
   "Genera tests API Rest Assured en la ruta configurada.",
-  {
-    configPath: z.string().optional(),
-  },
-  async ({ configPath }) => {
-    const context = await loadContext(configPath);
+  {},
+  async () => {
+    const context = await loadContext();
     const result = await generateRestTests(context);
     return asToolResult(`Generados ${result.files.length} archivos Rest Assured en ${context.config.restTests}.`);
   }
@@ -80,11 +77,10 @@ registerToolCompat(
   "generateE2ETests",
   "Genera tests E2E Cypress en la ruta configurada.",
   {
-    configPath: z.string().optional(),
     promptOverride: z.string().optional(),
   },
-  async ({ configPath, promptOverride }) => {
-    const context = await loadContext(configPath);
+  async ({ promptOverride }) => {
+    const context = await loadContext();
     const result = await generateE2ETests(context, promptOverride);
     return asToolResult(`Generados ${result.files.length} specs Cypress en ${context.config.e2eTests}.`);
   }
@@ -95,11 +91,10 @@ registerToolCompat(
   "exportETPAsExcel",
   "Exporta el ETP a Excel usando exceljs y plantilla configurada.",
   {
-    configPath: z.string().optional(),
     outputFileName: z.string().optional(),
   },
-  async ({ configPath, outputFileName }) => {
-    const context = await loadContext(configPath);
+  async ({ outputFileName }) => {
+    const context = await loadContext();
     const output = await exportETPAsExcel(context, outputFileName);
     return asToolResult(`ETP Excel exportado en ${output}.`);
   }
@@ -110,11 +105,10 @@ registerToolCompat(
   "exportETPAsWord",
   "Exporta el ETP a Word usando docx.",
   {
-    configPath: z.string().optional(),
     outputFileName: z.string().optional(),
   },
-  async ({ configPath, outputFileName }) => {
-    const context = await loadContext(configPath);
+  async ({ outputFileName }) => {
+    const context = await loadContext();
     const output = await exportETPAsWord(context, outputFileName);
     return asToolResult(`ETP Word exportado en ${output}.`);
   }

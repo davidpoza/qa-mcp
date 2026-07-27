@@ -25,6 +25,7 @@ export interface McpQaConfig {
   backend: BackendConfig;
   frontend: FrontendConfig;
   openApi: string;
+  appRouting?: string;
   requirements?: string;
   restTests: string;
   e2eTests: string;
