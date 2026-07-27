@@ -8,8 +8,12 @@ Servidor MCP para automatizar generación de artefactos de QA:
 
 Usa `mcp.config.json` en la raíz del proyecto para localizar OpenAPI, frontend, rutas de salida y plantillas.
 
-Para `generateE2ETests`, puedes definir un prompt único en `prompts/e2e.md` (configurable con `prompts.e2e` en `mcp.config.json`).  
+Para `generateE2ETests`, puedes definir un prompt único con `prompts.e2e` en `mcp.config.json` (opcional).  
+Si no se indica, usa por defecto `prompts/e2e.md` del servidor MCP.
 También puedes pasar `promptOverride` en la invocación de la tool para ajustar una ejecución puntual.
+
+Para `autoCompleteRfCu`, la plantilla de generación está externalizada en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional).  
+Si no se indica, usa por defecto `prompts/rfcu.md` del servidor MCP.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
 - asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`
@@ -58,7 +62,7 @@ Y elimina `qa-mcp` de la configuración global (**MCP: Open User Configuration**
    - Si quieres controlar explícitamente de dónde derivar CU, añade `appRouting` con la ruta del `app-routing.module.ts`.
 2. En VS Code Copilot, configura y arranca el servidor MCP `qa-mcp` con `cwd` apuntando a ese proyecto.
 3. En Copilot Chat (modo Agent), ejecuta las tools según necesidad:
-   - `autoCompleteRfCu`: completa `rf-cu.md` si faltan CU o acciones.
+   - `autoCompleteRfCu`: completa `rf-cu.md` generando RF/CU desde endpoints OpenAPI, rutas (`appRouting`) y análisis del frontend.
    - `generateRestTests`: genera tests API (Rest Assured).
    - `generateE2ETests`: genera tests E2E (Cypress) y deja Cypress/baseline configurado en frontend.
    - `exportETPAsExcel` / `exportETPAsWord`: exportan el plan de pruebas con evidencias.

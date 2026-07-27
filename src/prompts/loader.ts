@@ -11,9 +11,11 @@ function resolvePromptPath(context: LoadedContext): string {
   const configuredPath = context.config.prompts?.e2e;
   const configRoot = path.dirname(context.configPath);
   if (configuredPath && configuredPath.length > 0) {
-    return path.resolve(configRoot, configuredPath);
+    return path.isAbsolute(configuredPath)
+      ? configuredPath
+      : path.resolve(configRoot, configuredPath);
   }
-  return path.resolve(configRoot, "prompts", "e2e.md");
+  return path.resolve(__dirname, "..", "..", "prompts", "e2e.md");
 }
 
 function interpolatePrompt(template: string, context: LoadedContext, promptContext: PromptContext): string {
@@ -49,4 +51,3 @@ export async function loadE2EPrompt(
 
   return { text: finalPrompt, sourcePath: promptPath };
 }
-

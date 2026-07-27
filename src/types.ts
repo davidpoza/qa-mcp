@@ -18,6 +18,7 @@ export interface EvidenceConfig {
 
 export interface PromptsConfig {
   e2e?: string;
+  rfcu?: string;
 }
 
 export interface McpQaConfig {

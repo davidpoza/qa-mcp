@@ -27,6 +27,7 @@ const configSchema = z.object({
   }),
   prompts: z.object({
     e2e: z.string().min(1).optional(),
+    rfcu: z.string().min(1).optional(),
   }).optional(),
 });
 
