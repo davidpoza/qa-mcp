@@ -29,14 +29,9 @@ Reglas obligatorias de implementación:
 - Para horas/minutos usar clear/type con force cuando aplique.
 
 4) Selectores
-- Priorizar ids y selectores ya usados en el proyecto:
-  - #sociedad select
-  - #selectAirport select
-  - #pesoAeronave input
-  - #numPasajeros input
-  - #numPasajerosConexion input
-  - #accordion-aeronautical-services ...
-- Evitar selectores frágiles basados en estructura profunda innecesaria.
+- **Deriva los selectores del código frontend proporcionado** (ids, atributos `data-*`, `formControlName`, `name`, textos de opciones/botones). No inventes selectores que no aparezcan en el código.
+- Prioriza ids y atributos estables ya usados en las plantillas del proyecto.
+- Evita selectores frágiles basados en estructura profunda innecesaria.
 
 5) Sincronización y estabilidad
 - Usar timeouts explícitos en lecturas de options/inputs cuando corresponda.

@@ -8,9 +8,10 @@ Servidor MCP para automatizar generación de artefactos de QA:
 
 Usa `mcp.config.json` en la raíz del proyecto para localizar OpenAPI, frontend, rutas de salida y plantillas.
 
-Para `generateE2ETests`, puedes definir un prompt único con `prompts.e2e` en `mcp.config.json` (opcional).  
-Si no se indica, usa por defecto `prompts/e2e.md` del servidor MCP.
-También puedes pasar `promptOverride` en la invocación de la tool para ajustar una ejecución puntual.
+Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP sampling): para cada RF/CU, el modelo del cliente genera un spec Cypress **real** (con `cy.intercept`, interacción con selectores derivados del código frontend y aserciones), no un esqueleto de `cy.log`.
+- Puedes definir las reglas de estilo/interacción con `prompts.e2e` en `mcp.config.json` (opcional). Si no se indica, usa `prompts/e2e.md` del servidor MCP.
+- También puedes pasar `promptOverride` en la invocación de la tool para ajustar una ejecución puntual.
+- Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+).
 
 Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio):
 - Los **RF** se infieren de los endpoints de OpenAPI + las rutas de `appRouting`.
@@ -21,11 +22,12 @@ Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no us
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
 - asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`
-- asegura `cypress.config.js` y registra `registerBaselineTasks(on)` en `setupNodeEvents`
+- asegura `cypress.config.js` y registra `registerBaselineTasks(on)` en `setupNodeEvents` (omite la inyección si tu config ya define las tareas `readBaseline`/`writeBaseline`, para no duplicarlas)
 - usa `e2eBaseUrl` de `mcp.config.json` para `cy.visit(...)` en los specs generados
 - crea `cypress/support/e2e-baseline.js`
 - crea `cypress/fixtures/e2e-baseline.json`
 - crea `cypress/support/baseline-tasks.js` con tareas `readBaseline` y `writeBaseline`
+- crea `cypress/support/e2e-helpers.js`: librería compartida y agnóstica de dominio que todos los specs importan (`../support/e2e-helpers`). Incluye `normalizeAmount`, selectores de opciones robustos a controles custom (`resolveNativeSelect`/`getSelectOptions`/`selectFirstSelectableOption`/`selectRequiredOptionByTextOrValue`, que resuelven el `<select>` nativo aunque esté envuelto en un web component como `empresas-ui-dropdown`), `setInputValue`/`setNumericFieldValue`/`setValueByFormControl`, `dismissKnownOverlays`, `openAccordionByComponent` y `persistOrAssertBaseline`, para no reimplementar utilidades en cada test.
 
 Antes de lanzar Cypress, es necesario ejecutar:
 
