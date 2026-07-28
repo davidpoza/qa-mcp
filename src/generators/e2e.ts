@@ -40,7 +40,8 @@ function buildCypressSpec(
   entry: RfEntry,
   openApiContext: string,
   promptSummary: string,
-  promptPath: string
+  promptPath: string,
+  visitUrl: string
 ): string {
   const describeName = `${entry.id} - ${entry.name}`;
   const tests = entry.cases
@@ -51,7 +52,7 @@ function buildCypressSpec(
         `  it("${name}", () => {`,
         "    const currentSnapshot = {};",
         "    // TODO: poblar currentSnapshot con datos API/UI relevantes (totales, filas, columnas, estados, etc.)",
-        "    cy.visit('/');",
+        `    cy.visit("${visitUrl.replace(/"/g, '\\"')}");`,
         `    cy.log("RF: ${entry.id} | CU: ${cu.id}");`,
         `    cy.log("Prompt: ${promptSummary.replace(/"/g, '\\"')}");`,
         ...cu.steps.map((step) => `    cy.log("${step.replace(/"/g, '\\"')}");`),
@@ -300,7 +301,7 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
   }
 }
 
-function buildDefaultCypressConfigFile(): string {
+function buildDefaultCypressConfigFileWithBaseUrl(baseUrl?: string): string {
   return [
     "const { defineConfig } = require(\"cypress\");",
     "const { registerBaselineTasks } = require(\"./cypress/support/baseline-tasks\");",
@@ -308,6 +309,7 @@ function buildDefaultCypressConfigFile(): string {
     "module.exports = defineConfig({",
     "  e2e: {",
     "    specPattern: \"cypress/e2e/**/*.cy.{js,ts}\",",
+    ...(baseUrl ? [`    baseUrl: \"${baseUrl.replace(/"/g, '\\"')}\",`] : []),
     "    setupNodeEvents(on) {",
     "      registerBaselineTasks(on);",
     "    }",
@@ -382,7 +384,7 @@ async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void>
 
   const existingConfig = await readTextIfExists(cypressConfigPath);
   if (!existingConfig) {
-    await fs.writeFile(cypressConfigPath, buildDefaultCypressConfigFile(), "utf8");
+    await fs.writeFile(cypressConfigPath, buildDefaultCypressConfigFileWithBaseUrl(context.config.e2eBaseUrl), "utf8");
     return;
   }
 
@@ -404,6 +406,7 @@ export async function generateE2ETests(
 
   const entries: RfEntry[] = extractOrBuildRfEntries(context);
   const files: string[] = [];
+  const visitUrl = context.config.e2eBaseUrl ?? "/";
 
   for (const entry of entries) {
     const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
@@ -415,7 +418,8 @@ export async function generateE2ETests(
         entry,
         openApiSnippet(context.openApiContent),
         promptHeader(promptData.text),
-        promptData.sourcePath
+        promptData.sourcePath,
+        visitUrl
       ),
       "utf8"
     );

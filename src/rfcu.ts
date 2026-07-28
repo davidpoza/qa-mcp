@@ -2,6 +2,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext, RfEntry } from "./types";
 
+/**
+ * Firma de la función de muestreo LLM (MCP sampling).
+ * La implementa el servidor MCP delegando en el modelo del cliente
+ * (p. ej. Copilot vía `server.createMessage`).
+ */
+export type SampleFn = (prompt: string, maxTokens?: number) => Promise<string>;
+
 function normalizeLine(line: string): string {
   return line.replace(/\r/g, "").trimEnd();
 }
@@ -18,6 +25,10 @@ function stepRegex(): RegExp {
   return /^\d+\.\s+(.+)/;
 }
 
+/**
+ * Parsea un rf-cu.md ya existente al modelo `RfEntry[]`.
+ * Lo usan los generadores de tests (rest/e2e) para construir artefactos.
+ */
 export function parseRfCu(content: string): RfEntry[] {
   const lines = content.split("\n").map(normalizeLine);
   const rfEntries: RfEntry[] = [];
@@ -28,13 +39,7 @@ export function parseRfCu(content: string): RfEntry[] {
     const rfMatch = line.match(rfHeaderRegex());
     if (rfMatch) {
       const [, id, name, methodPath, operationId] = rfMatch;
-      currentRf = {
-        id,
-        name,
-        methodPath,
-        operationId,
-        cases: [],
-      };
+      currentRf = { id, name, methodPath, operationId, cases: [] };
       rfEntries.push(currentRf);
       currentCuIndex = -1;
       continue;
@@ -48,7 +53,7 @@ export function parseRfCu(content: string): RfEntry[] {
       continue;
     }
 
-    const stepMatch = line.match(stepRegex());
+    const stepMatch = line.trim().match(stepRegex());
     if (stepMatch && currentRf && currentCuIndex >= 0) {
       currentRf.cases[currentCuIndex].steps.push(stepMatch[1]);
     }
@@ -63,32 +68,10 @@ interface OpenApiEndpoint {
   operationId: string;
 }
 
-interface CuTemplateSeed {
-  nameTemplate: string;
-  stepTemplates: string[];
-}
-
-interface CuTemplateResolved {
-  name: string;
-  steps: string[];
-}
-
-function endpointTokens(endpointPath: string): string[] {
-  return endpointPath
-    .split("/")
-    .map((part) => part.trim().toLowerCase())
-    .filter((part) => part.length > 1 && !part.startsWith("{"))
-    .map((part) => part.replace(/[^a-z0-9_-]/g, ""));
-}
-
-function routeTokens(route: string): string[] {
-  return route
-    .split("/")
-    .map((part) => part.trim().toLowerCase())
-    .filter((part) => part.length > 0)
-    .map((part) => part.replace(/[^a-z0-9_-]/g, ""));
-}
-
+/**
+ * Extrae endpoints (método + path + operationId) de un openapi.yaml.
+ * Extracción estructural mínima basada en indentación; no interpreta semántica.
+ */
 function parseOpenApiEndpoints(openApiContent: string): OpenApiEndpoint[] {
   const lines = openApiContent.split("\n");
   const endpoints: OpenApiEndpoint[] = [];
@@ -150,321 +133,12 @@ function parseOpenApiEndpoints(openApiContent: string): OpenApiEndpoint[] {
   return endpoints;
 }
 
-async function listFrontendSourceFiles(root: string): Promise<string[]> {
-  const output: string[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch (error) {
-      const nodeError = error as NodeJS.ErrnoException;
-      if (nodeError.code === "ENOENT") {
-        return;
-      }
-      throw error;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") {
-          continue;
-        }
-        await walk(fullPath);
-      } else if (/\.(ts|tsx|js|jsx|html)$/i.test(entry.name)) {
-        output.push(fullPath);
-      }
-    }
-  };
-  await walk(root);
-  return output;
-}
-
-function scoreRouteAgainstEndpoint(route: string, endpointPath: string): number {
-  const routeSet = new Set(routeTokens(route));
-  const endpointSet = new Set(endpointTokens(endpointPath));
-  let score = 0;
-  for (const token of endpointSet) {
-    if (routeSet.has(token)) {
-      score += 1;
-    }
+function extractOpenApiTitle(openApiContent: string): string | undefined {
+  const match = openApiContent.match(/^\s{2,}title:\s*(.+)$/m);
+  if (!match) {
+    return undefined;
   }
-  return score;
-}
-
-interface FrontendCorpusEntry {
-  path: string;
-  content: string;
-}
-
-async function buildFrontendCorpus(frontendRoot: string): Promise<FrontendCorpusEntry[]> {
-  const srcRoot = path.join(frontendRoot, "src");
-  const files = await listFrontendSourceFiles(srcRoot);
-  const corpus: FrontendCorpusEntry[] = [];
-  for (const file of files) {
-    try {
-      corpus.push({
-        path: file,
-        content: (await fs.readFile(file, "utf8")).toLowerCase(),
-      });
-    } catch {
-      continue;
-    }
-  }
-  return corpus;
-}
-
-function estimateFrontendEvidence(
-  corpus: FrontendCorpusEntry[],
-  endpoint: OpenApiEndpoint,
-  relatedRoutes: string[]
-): { endpointMatches: number; routeMatches: number } {
-  const endpointNeedles = [endpoint.path, ...endpointTokens(endpoint.path)].filter((value) => value.length >= 2);
-  const routeNeedles = relatedRoutes.flatMap((route) => [route, ...routeTokens(route)]).filter((value) => value.length >= 2);
-
-  let endpointMatches = 0;
-  let routeMatches = 0;
-  for (const entry of corpus) {
-    const content = entry.content;
-    if (endpointNeedles.some((needle) => content.includes(needle.toLowerCase()))) {
-      endpointMatches += 1;
-    }
-    if (routeNeedles.some((needle) => content.includes(needle.toLowerCase()))) {
-      routeMatches += 1;
-    }
-  }
-  return { endpointMatches, routeMatches };
-}
-
-function defaultCuTemplateSeeds(): CuTemplateSeed[] {
-  return [
-    {
-      nameTemplate: "Flujo nominal de {RF_NAME}",
-      stepTemplates: [
-        "Preparar precondiciones y datos válidos del escenario.",
-        "Ejecutar la operación principal vinculada a {METHOD_PATH}.",
-        "Validar resultado esperado en backend y UI.",
-        "Registrar evidencia del resultado nominal.",
-      ],
-    },
-    {
-      nameTemplate: "Validaciones y errores de {RF_NAME}",
-      stepTemplates: [
-        "Preparar entradas inválidas o incompletas para el escenario.",
-        "Intentar ejecutar la operación asociada a {METHOD_PATH}.",
-        "Verificar mensajes de validación y restricciones funcionales esperadas.",
-        "Registrar evidencia del manejo de error.",
-      ],
-    },
-    {
-      nameTemplate: "Consistencia y actualización de {RF_NAME}",
-      stepTemplates: [
-        "Ejecutar nuevamente el escenario con una variación relevante de datos.",
-        "Capturar valores clave de la respuesta API y de la UI para {METHOD_PATH}.",
-        "Verificar coherencia entre datos recibidos y datos mostrados.",
-        "Registrar evidencia comparativa del resultado.",
-      ],
-    },
-  ];
-}
-
-function replaceTemplateVars(template: string, vars: Record<string, string>): string {
-  let result = template;
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replaceAll(`{${key}}`, value);
-  }
-  return result;
-}
-
-function resolveCuTemplates(seeds: CuTemplateSeed[], vars: Record<string, string>): CuTemplateResolved[] {
-  return seeds.map((seed) => ({
-    name: replaceTemplateVars(seed.nameTemplate, vars),
-    steps: seed.stepTemplates.map((step) => replaceTemplateVars(step, vars)),
-  }));
-}
-
-function parsePromptCuSeeds(content: string): CuTemplateSeed[] {
-  const lines = content.split("\n").map((line) => line.replace(/\r/g, "").trim());
-  const map = new Map<number, { nameTemplate?: string; stepTemplates: string[] }>();
-  for (const line of lines) {
-    const nameMatch = line.match(/^CU([1-9])_NAME:\s*(.+)$/i);
-    if (nameMatch) {
-      const index = Number(nameMatch[1]);
-      const current = map.get(index) ?? { stepTemplates: [] };
-      current.nameTemplate = nameMatch[2].trim();
-      map.set(index, current);
-      continue;
-    }
-    const stepMatch = line.match(/^CU([1-9])_STEP([1-9]):\s*(.+)$/i);
-    if (stepMatch) {
-      const index = Number(stepMatch[1]);
-      const stepIndex = Number(stepMatch[2]) - 1;
-      const current = map.get(index) ?? { stepTemplates: [] };
-      current.stepTemplates[stepIndex] = stepMatch[3].trim();
-      map.set(index, current);
-    }
-  }
-  const seeds: CuTemplateSeed[] = [];
-  for (let index = 1; index <= 3; index += 1) {
-    const current = map.get(index);
-    if (!current?.nameTemplate || current.stepTemplates.length < 4) {
-      return defaultCuTemplateSeeds();
-    }
-    seeds.push({
-      nameTemplate: current.nameTemplate,
-      stepTemplates: current.stepTemplates.slice(0, 4),
-    });
-  }
-  return seeds;
-}
-
-async function loadRfCuTemplateSeeds(context: LoadedContext): Promise<CuTemplateSeed[]> {
-  const configRoot = path.dirname(context.configPath);
-  const promptPathRaw = context.config.prompts?.rfcu;
-  const defaultPromptPath = path.resolve(__dirname, "..", "prompts", "rfcu.md");
-  const promptPath = promptPathRaw
-    ? (path.isAbsolute(promptPathRaw) ? promptPathRaw : path.resolve(configRoot, promptPathRaw))
-    : defaultPromptPath;
-  try {
-    const content = await fs.readFile(promptPath, "utf8");
-    return parsePromptCuSeeds(content);
-  } catch {
-    return defaultCuTemplateSeeds();
-  }
-}
-
-function buildRfFromEndpoint(
-  endpoint: OpenApiEndpoint,
-  index: number,
-  relatedRoutes: string[],
-  evidence: { endpointMatches: number; routeMatches: number },
-  templateSeeds: CuTemplateSeed[]
-): RfEntry {
-  const routeText = relatedRoutes.length > 0 ? relatedRoutes.join(", ") : "sin ruta directa";
-  const frontEvidenceText = `${evidence.endpointMatches} ficheros endpoint / ${evidence.routeMatches} ficheros ruta`;
-  const readableName = endpoint.operationId
-    ? endpoint.operationId.replace(/[_-]+/g, " ").trim()
-    : `${endpoint.method} ${endpoint.path}`;
-  const resolved = resolveCuTemplates(templateSeeds, {
-    RF_NAME: readableName,
-    METHOD_PATH: `${endpoint.method} ${endpoint.path}`,
-    OPERATION_ID: endpoint.operationId,
-    ROUTES: routeText,
-    FRONT_EVIDENCE: frontEvidenceText,
-  });
-
-  return {
-    id: `RF-${String(index + 1).padStart(2, "0")}`,
-    name: readableName.charAt(0).toUpperCase() + readableName.slice(1),
-    methodPath: `${endpoint.method} ${endpoint.path}`,
-    operationId: endpoint.operationId,
-    cases: [
-      {
-        id: "CU-1",
-        name: resolved[0].name,
-        steps: resolved[0].steps,
-      },
-      {
-        id: "CU-2",
-        name: resolved[1].name,
-        steps: resolved[1].steps,
-      },
-      {
-        id: "CU-3",
-        name: resolved[2].name,
-        steps: resolved[2].steps,
-      },
-    ],
-  };
-}
-
-async function buildRfFromOpenApiAndFrontend(
-  context: LoadedContext,
-  routes: string[],
-  templateSeeds: CuTemplateSeed[]
-): Promise<RfEntry[]> {
-  const endpoints = parseOpenApiEndpoints(context.openApiContent);
-  if (endpoints.length === 0) {
-    return [];
-  }
-  const configRoot = path.dirname(context.configPath);
-  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
-  const corpus = await buildFrontendCorpus(frontendRoot);
-  const output: RfEntry[] = [];
-
-  for (let index = 0; index < endpoints.length; index += 1) {
-    const endpoint = endpoints[index];
-    const scored = routes
-      .map((route) => ({ route, score: scoreRouteAgainstEndpoint(route, endpoint.path) }))
-      .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
-    const relatedRoutes = scored.map((entry) => entry.route);
-    const evidence = estimateFrontendEvidence(corpus, endpoint, relatedRoutes);
-    output.push(buildRfFromEndpoint(endpoint, index, relatedRoutes, evidence, templateSeeds));
-  }
-  return output;
-}
-
-function ensureCasesAndSteps(rfEntries: RfEntry[], templateSeeds: CuTemplateSeed[]): RfEntry[] {
-  return rfEntries.map((rf) => {
-    const minimumCuCount = 3;
-    const baseCases = rf.cases.length > 0 ? [...rf.cases] : [{ id: "CU-1", name: `Validación de ${rf.name}`, steps: [] }];
-    const templates = resolveCuTemplates(templateSeeds, {
-      RF_NAME: rf.name,
-      METHOD_PATH: rf.methodPath,
-      OPERATION_ID: rf.operationId,
-      ROUTES: "sin ruta directa",
-      FRONT_EVIDENCE: "sin evidencia",
-    });
-    while (baseCases.length < minimumCuCount) {
-      const template = templates[baseCases.length] ?? templates[templates.length - 1] ?? templates[0];
-      baseCases.push({
-        id: `CU-${baseCases.length + 1}`,
-        name: template.name,
-        steps: template.steps,
-      });
-    }
-
-    const completedCases = baseCases.map((cu, index) => {
-      const steps = cu.steps.length > 0
-        ? cu.steps
-        : (templates[index]?.steps ?? templates[0].steps);
-      return {
-        id: `CU-${index + 1}`,
-        name: cu.name,
-        steps,
-      };
-    });
-
-    return {
-      ...rf,
-      cases: completedCases,
-    };
-  });
-}
-
-export function renderRfCu(entries: RfEntry[], sourceOpenApi: string, sourceFront: string, scope = "General"): string {
-  const normalized = ensureCasesAndSteps(entries, defaultCuTemplateSeeds());
-  const lines: string[] = [];
-  lines.push(`# Requisitos funcionales (RF) y casos de uso (CU) — ${scope}`);
-  lines.push("");
-  lines.push(`> Fuente de RF: ${sourceOpenApi}`);
-  lines.push(`> Derivación de CU: ${sourceFront}`);
-  lines.push("");
-
-  normalized.forEach((rf, rfIndex) => {
-    lines.push(`${rfIndex + 1}. **${rf.id} — ${rf.name}** (\`${rf.methodPath}\`, \`${rf.operationId}\`).`);
-    lines.push("");
-    rf.cases.forEach((cu, cuIndex) => {
-      lines.push(`- **CU-${cuIndex + 1}: ${cu.name}.**`);
-      cu.steps.forEach((step, stepIndex) => {
-        lines.push(`  ${stepIndex + 1}. ${step}`);
-      });
-      lines.push("");
-    });
-  });
-
-  return `${lines.join("\n").trim()}\n`;
+  return match[1].replace(/^["']|["']$/g, "").trim() || undefined;
 }
 
 function resolveRoutingPath(context: LoadedContext): string {
@@ -482,15 +156,17 @@ function resolveRoutingPath(context: LoadedContext): string {
 async function tryReadRoutes(routingPath: string): Promise<string[]> {
   try {
     const content = await fs.readFile(routingPath, "utf8");
-    const matches = [...content.matchAll(/path:\s*['"`]([^'"`]+)['"`]/g)];
-    const unique = new Set<string>();
+    const matches = [...content.matchAll(/path:\s*['"`]([^'"`]*)['"`]/g)];
+    const unique: string[] = [];
+    const seen = new Set<string>();
     for (const match of matches) {
-      const value = match[1].trim();
-      if (value.length > 0) {
-        unique.add(`/${value}`);
+      const value = `/${match[1].trim()}`.replace(/\/+/g, "/");
+      if (!seen.has(value)) {
+        seen.add(value);
+        unique.push(value);
       }
     }
-    return Array.from(unique);
+    return unique;
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === "ENOENT") {
@@ -500,52 +176,142 @@ async function tryReadRoutes(routingPath: string): Promise<string[]> {
   }
 }
 
-export async function autoCompleteRfCu(context: LoadedContext, requirementsPathOverride?: string): Promise<{ outputPath: string; count: number }> {
-  const outputPath = requirementsPathOverride
-    ? path.resolve(process.cwd(), requirementsPathOverride)
-    : context.requirementsPath ?? path.resolve(path.dirname(context.configPath), "docs", "rf-cu.md");
+async function listFrontendSourceFiles(root: string): Promise<string[]> {
+  const output: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (["node_modules", "dist", ".git", ".angular", "coverage"].includes(entry.name)) {
+          continue;
+        }
+        await walk(fullPath);
+      } else if (/\.(ts|html)$/i.test(entry.name) && !/\.spec\.ts$/i.test(entry.name)) {
+        output.push(fullPath);
+      }
+    }
+  };
+  await walk(root);
+  return output;
+}
 
-  const sourceOpenApi = context.openApiPath;
-  const routingPath = resolveRoutingPath(context);
-  const sourceFront = routingPath;
-  const routes = await tryReadRoutes(routingPath);
-  const templateSeeds = await loadRfCuTemplateSeeds(context);
+/**
+ * Puntúa un fichero por su utilidad para inferir casos de uso.
+ * Prioriza estructura Angular genérica (componentes, páginas, rutas, servicios),
+ * sin ningún conocimiento del dominio concreto de la aplicación.
+ */
+function rankFrontendFile(filePath: string): number {
+  const lower = filePath.toLowerCase();
+  let score = 0;
+  if (/routing|routes/.test(lower)) score += 6;
+  if (/\.component\.(ts|html)$/.test(lower)) score += 5;
+  if (/(page|view|screen|container)/.test(lower)) score += 4;
+  if (/\.service\.ts$/.test(lower)) score += 3;
+  if (/\.html$/.test(lower)) score += 2;
+  if (/(environment|polyfill|main\.ts|\.module\.ts$)/.test(lower)) score -= 2;
+  return score;
+}
 
-  let entries: RfEntry[] = [];
-  const existing = await readTextIfExists(outputPath);
-  if (existing) {
-    entries = parseRfCu(existing);
-  }
-  if (entries.length === 0) {
-    const generatedFromOpenApi = await buildRfFromOpenApiAndFrontend(context, routes, templateSeeds);
-    entries = generatedFromOpenApi.length > 0 ? generatedFromOpenApi : [];
-  }
-  if (entries.length === 0) {
-    entries = [
-      {
-        id: "RF-01",
-        name: "Flujo principal",
-        methodPath: "OPENAPI-CONTEXT",
-        operationId: "derivado-del-contexto",
-        cases: resolveCuTemplates(templateSeeds, {
-          RF_NAME: "flujo principal",
-          METHOD_PATH: "OPENAPI-CONTEXT",
-          OPERATION_ID: "derivado-del-contexto",
-          ROUTES: "sin ruta directa",
-          FRONT_EVIDENCE: "sin evidencia",
-        }).map((template, index) => ({
-          id: `CU-${index + 1}`,
-          name: template.name,
-          steps: template.steps,
-        })),
-      },
-    ];
+/**
+ * Construye un paquete de código frontend acotado (con límites de tamaño)
+ * que se entrega al LLM como fuente para estimar los casos de uso.
+ */
+async function buildFrontendCodeBundle(
+  frontendRoot: string,
+  maxTotalChars = 40000,
+  maxPerFile = 3000
+): Promise<string> {
+  const srcRoot = path.join(frontendRoot, "src");
+  const files = await listFrontendSourceFiles(srcRoot);
+  files.sort((a, b) => rankFrontendFile(b) - rankFrontendFile(a));
+
+  const parts: string[] = [];
+  let total = 0;
+  for (const file of files) {
+    if (total >= maxTotalChars) {
+      break;
+    }
+    let content: string;
+    try {
+      content = await fs.readFile(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (content.trim().length === 0) {
+      continue;
+    }
+    const truncated = content.length > maxPerFile ? `${content.slice(0, maxPerFile)}\n/* ...truncado... */` : content;
+    const rel = path.relative(frontendRoot, file).replace(/\\/g, "/");
+    const block = `\n### ${rel}\n\`\`\`\n${truncated}\n\`\`\`\n`;
+    if (total + block.length > maxTotalChars) {
+      break;
+    }
+    parts.push(block);
+    total += block.length;
   }
 
-  const rendered = renderRfCu(ensureCasesAndSteps(entries, templateSeeds), sourceOpenApi, sourceFront);
-  await fs.mkdir(path.dirname(outputPath), { recursive: true });
-  await fs.writeFile(outputPath, rendered, "utf8");
-  return { outputPath, count: entries.length };
+  return parts.length > 0 ? parts.join("") : "(sin código frontend disponible)";
+}
+
+function formatEndpointsForPrompt(endpoints: OpenApiEndpoint[]): string {
+  if (endpoints.length === 0) {
+    return "(no se detectaron endpoints en openapi)";
+  }
+  return endpoints.map((endpoint) => `- ${endpoint.method} ${endpoint.path} (${endpoint.operationId})`).join("\n");
+}
+
+function formatRoutesForPrompt(routes: string[]): string {
+  if (routes.length === 0) {
+    return "(no se detectaron rutas de enrutado)";
+  }
+  return routes.map((route) => `- ${route}`).join("\n");
+}
+
+function fillPromptTemplate(template: string, vars: Record<string, string>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replaceAll(`{${key}}`, value);
+  }
+  return result;
+}
+
+async function loadRfCuPrompt(context: LoadedContext): Promise<string> {
+  const configRoot = path.dirname(context.configPath);
+  const promptPathRaw = context.config.prompts?.rfcu;
+  const defaultPromptPath = path.resolve(__dirname, "..", "prompts", "rfcu.md");
+  const promptPath = promptPathRaw
+    ? path.isAbsolute(promptPathRaw)
+      ? promptPathRaw
+      : path.resolve(configRoot, promptPathRaw)
+    : defaultPromptPath;
+  return fs.readFile(promptPath, "utf8");
+}
+
+/**
+ * Elimina vallas de código (```), encabezados de lenguaje y texto sobrante
+ * que el LLM pudiera añadir alrededor del markdown final.
+ */
+function sanitizeGeneratedMarkdown(raw: string): string {
+  let text = raw.trim();
+  const fenceMatch = text.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  }
+  const titleIndex = text.indexOf("# Requisitos funcionales");
+  if (titleIndex > 0) {
+    text = text.slice(titleIndex).trim();
+  }
+  return `${text}\n`;
 }
 
 async function readTextIfExists(filePath: string): Promise<string | undefined> {
@@ -560,20 +326,85 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * Autocompleta rf-cu.md de forma genérica:
+ *  - Infiere los RF a partir de los endpoints OpenAPI + rutas de enrutado.
+ *  - Estima los CU delegando en el LLM del cliente (MCP sampling), que analiza
+ *    el código frontend real. No usa plantillas ni heurísticas de dominio.
+ */
+export async function autoCompleteRfCu(
+  context: LoadedContext,
+  sample: SampleFn,
+  requirementsPathOverride?: string
+): Promise<{ outputPath: string; count: number }> {
+  const configRoot = path.dirname(context.configPath);
+  const outputPath = requirementsPathOverride
+    ? path.resolve(process.cwd(), requirementsPathOverride)
+    : context.requirementsPath ?? path.resolve(configRoot, "docs", "rf-cu.md");
+
+  const endpoints = parseOpenApiEndpoints(context.openApiContent);
+  const routingPath = resolveRoutingPath(context);
+  const routes = await tryReadRoutes(routingPath);
+  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
+  const frontendCode = await buildFrontendCodeBundle(frontendRoot);
+  const existing = (await readTextIfExists(outputPath))?.trim();
+
+  const scope = extractOpenApiTitle(context.openApiContent) ?? "General";
+  const promptTemplate = await loadRfCuPrompt(context);
+  const prompt = fillPromptTemplate(promptTemplate, {
+    SCOPE: scope,
+    OPENAPI_SOURCE: context.openApiPath,
+    FRONT_SOURCE: routes.length > 0 ? routingPath : frontendRoot,
+    OPENAPI_ENDPOINTS: formatEndpointsForPrompt(endpoints),
+    ROUTES: formatRoutesForPrompt(routes),
+    FRONTEND_CODE: frontendCode,
+    EXISTING_RFCU: existing && existing.length > 0 ? existing : "(no existe; genéralo desde cero)",
+  });
+
+  const generated = await sample(prompt, 8000);
+  if (!generated || generated.trim().length === 0) {
+    throw new Error(
+      "El modelo no devolvió contenido para rf-cu.md. Verifica que el cliente MCP soporte sampling (createMessage)."
+    );
+  }
+
+  const markdown = sanitizeGeneratedMarkdown(generated);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await fs.writeFile(outputPath, markdown, "utf8");
+
+  const count = parseRfCu(markdown).length;
+  return { outputPath, count };
+}
+
+/**
+ * Devuelve RF/CU a partir de un rf-cu.md existente (para generar tests).
+ * Si no hay requisitos, entrega una entrada mínima genérica de arranque.
+ */
 export function extractOrBuildRfEntries(context: LoadedContext): RfEntry[] {
   if (context.requirementsContent) {
     const parsed = parseRfCu(context.requirementsContent);
     if (parsed.length > 0) {
-      return ensureCasesAndSteps(parsed, defaultCuTemplateSeeds());
+      return parsed;
     }
   }
-  return ensureCasesAndSteps([
+  return [
     {
       id: "RF-01",
       name: "Flujo principal",
       methodPath: "OPENAPI-CONTEXT",
       operationId: "derivado-del-contexto",
-      cases: [],
+      cases: [
+        {
+          id: "CU-1",
+          name: "Validación del flujo principal",
+          steps: [
+            "Acceder al módulo asociado y preparar datos válidos del escenario.",
+            "Ejecutar la operación principal del flujo.",
+            "Verificar la respuesta esperada en API y su reflejo en la interfaz.",
+            "Registrar evidencia del resultado obtenido.",
+          ],
+        },
+      ],
     },
-  ], defaultCuTemplateSeeds());
+  ];
 }

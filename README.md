@@ -12,12 +12,17 @@ Para `generateE2ETests`, puedes definir un prompt único con `prompts.e2e` en `m
 Si no se indica, usa por defecto `prompts/e2e.md` del servidor MCP.
 También puedes pasar `promptOverride` en la invocación de la tool para ajustar una ejecución puntual.
 
-Para `autoCompleteRfCu`, la plantilla de generación está externalizada en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional).  
-Si no se indica, usa por defecto `prompts/rfcu.md` del servidor MCP.
+Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio):
+- Los **RF** se infieren de los endpoints de OpenAPI + las rutas de `appRouting`.
+- Los **CU** los **estima el modelo del cliente** analizando el código frontend real (componentes, plantillas, servicios), vía **MCP sampling** (`sampling/createMessage`).
+- Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+).
+- El prompt de instrucciones está externalizado en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP.
+- Si ya existe un `rf-cu.md` parcial, se completa respetando lo ya definido.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
 - asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`
 - asegura `cypress.config.js` y registra `registerBaselineTasks(on)` en `setupNodeEvents`
+- usa `e2eBaseUrl` de `mcp.config.json` para `cy.visit(...)` en los specs generados
 - crea `cypress/support/e2e-baseline.js`
 - crea `cypress/fixtures/e2e-baseline.json`
 - crea `cypress/support/baseline-tasks.js` con tareas `readBaseline` y `writeBaseline`
@@ -60,9 +65,10 @@ Y elimina `qa-mcp` de la configuración global (**MCP: Open User Configuration**
 
 1. En el proyecto a documentar, crea/ajusta `mcp.config.json` en su raíz con rutas de backend, frontend, OpenAPI y salidas de tests/evidencias.
    - Si quieres controlar explícitamente de dónde derivar CU, añade `appRouting` con la ruta del `app-routing.module.ts`.
+   - Para fijar la URL de ejecución E2E, añade `e2eBaseUrl` (ej. `https://mi-entorno.aena.es`).
 2. En VS Code Copilot, configura y arranca el servidor MCP `qa-mcp` con `cwd` apuntando a ese proyecto.
 3. En Copilot Chat (modo Agent), ejecuta las tools según necesidad:
-   - `autoCompleteRfCu`: completa `rf-cu.md` generando RF/CU desde endpoints OpenAPI, rutas (`appRouting`) y análisis del frontend.
+   - `autoCompleteRfCu`: completa `rf-cu.md`. Infiere RF desde OpenAPI + `appRouting` y estima los CU con el LLM del cliente (MCP sampling) analizando el frontend.
    - `generateRestTests`: genera tests API (Rest Assured).
    - `generateE2ETests`: genera tests E2E (Cypress) y deja Cypress/baseline configurado en frontend.
    - `exportETPAsExcel` / `exportETPAsWord`: exportan el plan de pruebas con evidencias.

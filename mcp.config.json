@@ -10,6 +10,7 @@
     "framework": "angular",
     "e2e": "cypress"
   },
+  "e2eBaseUrl": "http://localhost:4200",
   "openApi": "./backend/openapi.yaml",
   "appRouting": "./frontend/src/app/app-routing.module.ts",
   "requirements": "./docs/rf-cu.md",

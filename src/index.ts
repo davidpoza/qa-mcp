@@ -55,7 +55,34 @@ registerToolCompat(
   },
   async ({ requirementsPath }) => {
     const context = await loadContext();
-    const result = await autoCompleteRfCu(context, requirementsPath);
+    const sample = async (prompt: string, maxTokens = 8000): Promise<string> => {
+      try {
+        const response = await server.server.createMessage(
+          {
+            messages: [
+              {
+                role: "user",
+                content: { type: "text", text: prompt },
+              },
+            ],
+            maxTokens,
+          },
+          {
+            timeout: 300000,
+            resetTimeoutOnProgress: true,
+            maxTotalTimeout: 600000,
+          }
+        );
+        return response.content.type === "text" ? response.content.text : "";
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `No se pudo solicitar la generación al modelo (MCP sampling). ` +
+            `Asegúrate de usar un cliente que soporte 'sampling/createMessage' (p. ej. VS Code Copilot 1.102+). Detalle: ${message}`
+        );
+      }
+    };
+    const result = await autoCompleteRfCu(context, sample, requirementsPath);
     return asToolResult(`rf-cu actualizado en ${result.outputPath} con ${result.count} RF.`);
   }
 );
