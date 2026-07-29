@@ -19,7 +19,7 @@ Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP s
 - El modo asistido se activa **automáticamente** al detectar la falta de sampling. También puedes forzarlo con el parámetro `assisted: true` en la invocación.
 
 **Bucle de auto-corrección en modo asistido (`runE2ETests`):** aunque el cliente no tenga sampling, el servidor **sí puede ejecutar Cypress** y devolver el resultado como feedback. Flujo:
-1. `generateE2ETests` (modo asistido) → el agente genera y escribe cada `.cy.ts` (uno por llamada) hasta que no queden pendientes.
+1. `generateE2ETests` (modo asistido) → el agente genera y escribe cada `.cy.js` (uno por llamada) hasta que no queden pendientes.
 2. `runE2ETests` (params: `rfFilter?`, `promptOverride?`) → el servidor **ejecuta Cypress** (limpiando el baseline entre intentos), reporta el estado de todos los RF y devuelve, para **UN** RF que falla, la **salida real de Cypress** + un **PROMPT DE CORRECCIÓN** ya construido.
 3. El agente aplica ese prompt reescribiendo el fichero y **vuelve a llamar** a `runE2ETests`; recibirá el siguiente RF que falle.
 4. Repetir hasta que `runE2ETests` reporte todos los RF en verde.

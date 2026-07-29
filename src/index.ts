@@ -104,7 +104,7 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
       "Siguiente paso: llama a la tool `runE2ETests` para EJECUTAR Cypress y obtener el feedback.",
       "Para cada RF que falle, `runE2ETests` te devuelve la salida real + un PROMPT DE CORRECCIÓN; aplícalo reescribiendo el fichero y vuelve a llamar a `runE2ETests` hasta que todos pasen.",
       `Directorio de trabajo: ${fallback.frontendRoot}`,
-      "(Si quieres regenerar algún RF desde cero, borra su .cy.ts y vuelve a llamar a generateE2ETests.)",
+      "(Si quieres regenerar algún RF desde cero, borra su .cy.js y vuelve a llamar a generateE2ETests.)",
     ].join("\n");
   }
 
@@ -116,13 +116,14 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     `Progreso: ${generated}/${fallback.totalCount} RF con spec. Este mensaje contiene el SIGUIENTE RF pendiente (se emite de UNO EN UNO para no desbordar el contexto).`,
     "",
     "QUÉ HACER AHORA:",
-    "1) Genera el contenido del `.cy.ts` siguiendo EXACTAMENTE el PROMPT de abajo.",
+    "1) Genera el contenido del `.cy.js` (JavaScript PLANO, sin TypeScript) siguiendo EXACTAMENTE el PROMPT de abajo.",
     "2) Escríbelo en la RUTA DE SALIDA exacta (no cambies el nombre).",
     `3) Vuelve a llamar a \`generateE2ETests\` para recibir el siguiente RF pendiente (quedan ${fallback.pendingCount}). Repite hasta que no queden pendientes.`,
     "4) Cuando todos los specs estén escritos, llama a `runE2ETests` para ejecutarlos e iterar con el feedback real de Cypress hasta que pasen.",
+    "IMPORTANTE: NO intentes 'arreglar' errores de tipos de TypeScript ni tocar tsconfig; los specs son `.cy.js` y Cypress NO hace type-check. El ÚNICO criterio de éxito es que Cypress pase (usa `runE2ETests`).",
     "",
     `===== ${spec.rf} — ${spec.name} =====`,
-    `Ruta de salida (escribe aquí el .cy.ts): ${spec.filePath}`,
+    `Ruta de salida (escribe aquí el .cy.js): ${spec.filePath}`,
     `Spec relativo (para --spec): ${spec.specRelPath}`,
     `Directorio de trabajo para Cypress: ${fallback.frontendRoot}`,
     "--- PROMPT DE GENERACIÓN ---",
@@ -227,7 +228,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA los tests E2E de Cypress (.cy.ts), iterando y corrigiéndolos hasta que pasen. Herramienta AUTÓNOMA: obtiene los RF/CU de rf-cu.md o los deriva de OpenAPI automáticamente; NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Si el cliente no soporta MCP sampling, prepara el entorno Cypress y devuelve los prompts + rutas para que el agente genere, escriba y ejecute los specs (modo asistido).",
+  "Genera y EJECUTA los tests E2E de Cypress (.cy.js), iterando y corrigiéndolos hasta que pasen. Herramienta AUTÓNOMA: obtiene los RF/CU de rf-cu.md o los deriva de OpenAPI automáticamente; NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Si el cliente no soporta MCP sampling, prepara el entorno Cypress y devuelve los prompts + rutas para que el agente genere, escriba y ejecute los specs (modo asistido).",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),

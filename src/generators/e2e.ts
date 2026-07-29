@@ -391,7 +391,7 @@ function buildE2EGenerationPrompt(params: {
   return [
     fix
       ? "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que TODOS los `it()` pasen sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura de TODOS los Casos de Uso."
-      : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE (`.cy.ts`) para el siguiente Requisito Funcional y sus Casos de Uso.",
+      : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE en JavaScript PLANO (`.cy.js`) para el siguiente Requisito Funcional y sus Casos de Uso.",
     "",
     `## Requisito funcional: ${entry.id} — ${entry.name}`,
     `- Endpoint asociado: \`${entry.methodPath}\` (operationId: \`${entry.operationId}\`).`,
@@ -402,6 +402,7 @@ function buildE2EGenerationPrompt(params: {
     formatCasesForPrompt(entry),
     "",
     "## Cómo implementar (OBLIGATORIO):",
+    "- **JAVASCRIPT PLANO (CRÍTICO)**: el fichero es `.cy.js`, NO TypeScript. PROHIBIDO usar sintaxis TS: sin anotaciones de tipo (`: string`, `: number`, `param: Tipo`), sin aserciones `as` (`response.body as Array<...>`), sin `interface`/`type`, sin genéricos `<T>`, sin `!` de non-null. Escribe JavaScript ES2018 válido que un navegador ejecute sin transpilar tipos. (Cypress NO hace type-check; cualquier sintaxis TS rompe la ejecución del spec.)",
     "- Reutiliza los helpers compartidos importándolos de `../support/e2e-helpers` (NO reimplementes utilidades):",
     helperApiSummary(),
     "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un `it` por CU (nombres `\"<CU-id> <nombre>\"`, en español).",
@@ -465,7 +466,7 @@ function buildE2EGenerationPrompt(params: {
       : "",
     "",
     "## Salida:",
-    "Devuelve ÚNICAMENTE el contenido del fichero `.cy.ts`, sin explicaciones y sin vallas de código (` ``` `). Debe empezar por el `require` de `../support/e2e-helpers` y contener el `describe` con todos los `it` implementados de forma ejecutable.",
+    "Devuelve ÚNICAMENTE el contenido del fichero `.cy.js`, sin explicaciones y sin vallas de código (` ``` `). Debe empezar por el `require` de `../support/e2e-helpers` y contener el `describe` con todos los `it` implementados de forma ejecutable.",
   ].join("\n");
 }
 
@@ -908,7 +909,7 @@ function buildDefaultCypressConfigFileWithBaseUrl(baseUrl?: string): string {
     "",
     "module.exports = defineConfig({",
     "  e2e: {",
-    "    specPattern: \"cypress/e2e/**/*.cy.{js,ts}\",",
+    "    specPattern: \"cypress/e2e/**/*.cy.js\",",
     ...(baseUrl ? [`    baseUrl: \"${baseUrl.replace(/"/g, '\\"')}\",`] : []),
     "    setupNodeEvents(on) {",
     "      registerBaselineTasks(on);",
@@ -1094,7 +1095,7 @@ export async function generateE2ETests(
   const openApiContext = openApiSnippet(context.openApiContent);
 
   for (const entry of entries) {
-    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
+    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
     const fullPath = path.join(outputRoot, fileName);
     const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
 
@@ -1187,7 +1188,7 @@ export async function generateE2ETests(
 export interface E2EFallbackSpec {
   rf: string;
   name: string;
-  /** Ruta absoluta donde el agente debe escribir el `.cy.ts`. */
+  /** Ruta absoluta donde el agente debe escribir el `.cy.js`. */
   filePath: string;
   /** Ruta relativa al frontend para usar con `--spec`. */
   specRelPath: string;
@@ -1265,7 +1266,7 @@ export async function prepareE2EFallback(
 
   const targets = await Promise.all(
     entries.map(async (entry) => {
-      const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
+      const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
       const fullPath = path.join(outputRoot, fileName);
       const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
       return { entry, fullPath, specRelPath, exists: await fileExists(fullPath) };
@@ -1387,7 +1388,7 @@ export async function runE2EFallback(
   const failures: Failure[] = [];
 
   for (const entry of entries) {
-    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
+    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
     const fullPath = path.join(outputRoot, fileName);
     const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
 
