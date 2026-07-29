@@ -3,6 +3,7 @@ import path from "node:path";
 import { LoadedContext, RfEntry } from "../types";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
+import { runCypressSpec, extractCypressFailureSummary } from "./cypress-runner";
 
 function slug(value: string): string {
   return value
@@ -252,15 +253,7 @@ function rfCorrelationTokens(entry: RfEntry): string[] {
   return [...tokens];
 }
 
-/**
- * Construye un bundle de código frontend ENFOCADO en un RF concreto: localiza
- * el/los directorio(s) de componente que consumen su endpoint (por tokens del
- * path/operationId presentes en ficheros co-ubicados) y arrastra sus plantillas
- * y presenters (fuente de selectores reales), añadiendo además el contexto
- * global (pantalla principal con filtros, routing). Genérico y agnóstico de
- * idioma/dominio.
- */
-function buildRfFocusedBundle(sources: FrontendSource[], entry: RfEntry, maxTotalChars = 90000): string {
+function rankRfSources(sources: FrontendSource[], entry: RfEntry): FrontendSource[] {
   const tokens = rfCorrelationTokens(entry);
   const countHits = (text: string): number => {
     const lower = text.toLowerCase();
@@ -289,8 +282,7 @@ function buildRfFocusedBundle(sources: FrontendSource[], entry: RfEntry, maxTota
 
   // Núcleo global: plantillas "anfitrionas" (pantalla principal que hospeda los
   // componentes hijos y define los filtros globales). Se detectan por densidad
-  // de tags `<app-*>` y de `formcontrolname`. Se garantizan en el bundle para
-  // que el test pueda inicializar el contexto base. Genérico, sin dominio.
+  // de tags `<app-*>` y de `formcontrolname`. Genérico, sin dominio.
   const globalScore = (source: FrontendSource): number => {
     if (!/\.component\.html$/i.test(source.rel)) return 0;
     const childTags = (source.content.match(/<app-[a-z]/gi) ?? []).length;
@@ -326,7 +318,19 @@ function buildRfFocusedBundle(sources: FrontendSource[], entry: RfEntry, maxTota
     return score;
   };
 
-  const ordered = [...sources].sort((a, b) => priority(b) - priority(a));
+  return [...sources].filter((s) => priority(s) > 0).sort((a, b) => priority(b) - priority(a));
+}
+
+/**
+ * Construye un bundle de código frontend ENFOCADO en un RF concreto: localiza
+ * el/los directorio(s) de componente que consumen su endpoint (por tokens del
+ * path/operationId presentes en ficheros co-ubicados) y arrastra sus plantillas
+ * y presenters (fuente de selectores reales), añadiendo además el contexto
+ * global (pantalla principal con filtros, routing). Genérico y agnóstico de
+ * idioma/dominio.
+ */
+function buildRfFocusedBundle(sources: FrontendSource[], entry: RfEntry, maxTotalChars = 90000): string {
+  const ordered = rankRfSources(sources, entry);
   const parts: string[] = [];
   let total = 0;
   for (const source of ordered) {
@@ -338,6 +342,20 @@ function buildRfFocusedBundle(sources: FrontendSource[], entry: RfEntry, maxTota
     total += block.length;
   }
   return parts.length > 0 ? parts.join("") : buildBroadFrontendBundle(sources, maxTotalChars);
+}
+
+/**
+ * Variante LEAN para modo asistido: en vez de embeber el código frontend (que
+ * desbordaría el contexto del cliente), devuelve la LISTA de rutas relativas de
+ * los ficheros más relevantes para el RF, para que el propio agente los abra
+ * con sus herramientas de fichero y derive de ahí los selectores reales.
+ */
+function buildRfFocusedFileList(sources: FrontendSource[], entry: RfEntry, maxFiles = 20): string {
+  const ordered = rankRfSources(sources, entry).slice(0, maxFiles);
+  if (ordered.length === 0) {
+    return "(no se localizaron ficheros frontend relevantes; explora `src/` para derivar selectores)";
+  }
+  return ordered.map((s) => `- ${s.rel}`).join("\n");
 }
 
 function formatCasesForPrompt(entry: RfEntry): string {
@@ -362,14 +380,18 @@ function buildE2EGenerationPrompt(params: {
   visitUrl: string;
   openApiContext: string;
   promptOverride?: string;
+  fix?: { currentSpec: string; cypressOutput: string; attempt: number };
+  frontendIsFileList?: boolean;
 }): string {
-  const { entry, rules, frontendContext, visitUrl, openApiContext, promptOverride } = params;
+  const { entry, rules, frontendContext, visitUrl, openApiContext, promptOverride, fix, frontendIsFileList } = params;
   const method = entry.methodPath.split(/\s+/)[0] ?? "GET";
   const endpointPath = endpointPathFromMethodPath(entry.methodPath);
   const glob = interceptGlobFromPath(endpointPath);
 
   return [
-    "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE (`.cy.ts`) para el siguiente Requisito Funcional y sus Casos de Uso.",
+    fix
+      ? "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que TODOS los `it()` pasen sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura de TODOS los Casos de Uso."
+      : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE (`.cy.ts`) para el siguiente Requisito Funcional y sus Casos de Uso.",
     "",
     `## Requisito funcional: ${entry.id} — ${entry.name}`,
     `- Endpoint asociado: \`${entry.methodPath}\` (operationId: \`${entry.operationId}\`).`,
@@ -397,6 +419,7 @@ function buildE2EGenerationPrompt(params: {
     "- CU de error/vacío (500, 404, `[]`): haz **stub** con `cy.intercept(method, glob, { statusCode, body })`, dispara la acción y comprueba el efecto observable QUE EXISTA en el código.",
     "- **Aserción AUTORITATIVA en vacío/error = la RESPUESTA interceptada**: `cy.wait('@alias').then(({ response }) => { expect(response?.statusCode).to.eq(<code>); ... })`. Esa es la comprobación principal y siempre válida; en muchos CU basta con ella.",
     "- **ERROR (4xx/5xx)**: además, verifica el manejo de error REAL del código. En esta clase de apps un interceptor/guard global suele redirigir a una ruta de error: en ese caso usa `cy.url().should('include', '/error')`. Búscalo en el código (error-interceptor, routing, pantalla de error). NO asumas que la vista permanece en la pantalla actual (NO escribas `cy.url().should('include','/<pantalla-actual>')`) salvo que el código lo demuestre.",
+    "- **ERROR (4xx/5xx) — ACCIÓN MÍNIMA Y PARAR (MUY IMPORTANTE)**: si la app redirige a una pantalla de error global ante un fallo, la navegación DESMONTA la página. Por eso, en un CU de error: (1) haz SOLO la acción MÍNIMA que dispara el endpoint objetivo (a menudo basta con recargar o con fijar el ÚNICO filtro del que depende ese endpoint; NO montes todo el contexto ni fijes filtros/inputs que no hagan falta). (2) Afirma el efecto de error (`cy.url().should('include', '/error')`). (3) PARA: NO sigas seleccionando/escribiendo en otros controles ni leas combos después, porque el redirect los desmonta y obtendrás `cy.select() failed because the page updated while this command was executing` o `detached from the DOM`. NO reintentes el flujo dentro del mismo `it`.",
     "- **VACÍO (200 [])**: la comprobación principal es el body vacío (`expect(response?.body).to.deep.eq([])`). Si el código muestra un mensaje/estado vacío concreto (texto o selector real), puedes aférralo; si no, la aserción de la respuesta es suficiente.",
     "- **PROHIBIDO afirmar recuentos EXACTOS de opciones de un `<select>`** (p. ej. `expect(selectable.length).to.eq(0)`): los desplegables suelen conservar una opción placeholder/por defecto CON value, así que el recuento NO será 0 y el test fallará (`expected 1 to equal 0`). Si necesitas comprobar que un desplegable no recibió datos ausentes, verifica que NINGUNA `option` coincide (por texto) con datos de la API (para `[]` es trivialmente cierto); NUNCA un recuento exacto.",
     "- **PROHIBIDO en CU vacío/error**: NO leas ni afirmes sobre controles distintos del afectado DIRECTAMENTE por ese endpoint, NI sobre el número de llamadas a otros endpoints. Estas asunciones (controles dependientes deshabilitados/vaciados) suelen ser FALSAS y rompen el test. NO asumas clases genéricas como `.error-message` o `.alert-danger` si no están en el código.",
@@ -413,10 +436,32 @@ function buildE2EGenerationPrompt(params: {
     "",
     `## Contexto OpenAPI: ${openApiContext}`,
     "",
-    "## Código frontend (fuente de selectores y comportamiento real):",
+    frontendIsFileList
+      ? "## Ficheros frontend relevantes (ÁBRELOS con tus herramientas de fichero para derivar los selectores y el comportamiento reales; NO inventes selectores):"
+      : "## Código frontend (fuente de selectores y comportamiento real):",
     frontendContext,
     promptOverride && promptOverride.trim().length > 0
       ? `\n## Instrucciones adicionales de esta ejecución:\n${promptOverride.trim()}`
+      : "",
+    fix
+      ? [
+          "",
+          `## Spec actual que FALLA (intento previo #${fix.attempt}):`,
+          "```ts",
+          fix.currentSpec.trim(),
+          "```",
+          "",
+          "## Salida de Cypress con los errores a corregir:",
+          "```",
+          fix.cypressOutput.trim(),
+          "```",
+          "",
+          "## Cómo corregir (OBLIGATORIO):",
+          "- Diagnostica CADA test fallido a partir del mensaje de aserción, el code-frame y el stack de la salida de Cypress.",
+          "- Corrige la causa REAL del fallo aplicando TODAS las reglas de arriba (selectores literales del código, controles custom, valores sintéticos `[ngValue]`, esperar opciones asíncronas con `waitForSelectableOptions`, CU de error = acción mínima + `cy.url().should('include','/error')` + PARAR, no afirmar recuentos exactos de opciones, no tocar controles no afectados, etc.).",
+          "- Si un `it()` YA pasaba, NO cambies su lógica salvo que sea imprescindible; céntrate en los que fallan.",
+          "- No elimines Casos de Uso ni los conviertas en `it.skip`. Todos deben quedar ejecutables y en verde.",
+        ].join("\n")
       : "",
     "",
     "## Salida:",
@@ -958,19 +1003,90 @@ async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void>
   }
 }
 
+/**
+ * Elimina del fixture de baseline las claves pertenecientes a un RF concreto
+ * (p. ej. `rf-01.cu-1`), para que cada re-ejecución dentro del bucle de
+ * corrección vuelva a autocapturar y no falle por deriva del baseline previo.
+ */
+async function clearBaselineForRf(frontendRoot: string, rfId: string): Promise<void> {
+  const fixturesPath = path.resolve(frontendRoot, baselineFixtureRelativePath);
+  const raw = await readTextIfExists(fixturesPath);
+  if (!raw) return;
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const prefix = `${rfId.toLowerCase()}.`;
+  let changed = false;
+  for (const key of Object.keys(data)) {
+    if (key.toLowerCase().startsWith(prefix)) {
+      delete data[key];
+      changed = true;
+    }
+  }
+  if (changed) {
+    await fs.writeFile(fixturesPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  }
+}
+
+export interface E2EIterationResult {
+  rf: string;
+  file: string;
+  passed: boolean;
+  attempts: number;
+  lastOutput?: string;
+}
+
+export interface GenerateE2EOptions {
+  promptOverride?: string;
+  /** Si true (por defecto), ejecuta Cypress e itera hasta que el spec pase. */
+  runTests?: boolean;
+  /** Número máximo de intentos (generación + correcciones) por RF. */
+  maxIterations?: number;
+  /** Subconjunto de ids de RF a generar (p. ej. ["RF-01","RF-03"]). Vacío = todos. */
+  rfFilter?: string[];
+  /** Comando base para ejecutar Cypress (por defecto el de la config o `npx cypress run`). */
+  runCommand?: string;
+  /** Timeout por ejecución de Cypress en ms. */
+  runTimeoutMs?: number;
+}
+
 export async function generateE2ETests(
   context: LoadedContext,
   sample: E2ESampleFn,
-  promptOverride?: string
-): Promise<{ files: string[]; rfCount: number }> {
+  options: GenerateE2EOptions = {}
+): Promise<{ files: string[]; rfCount: number; iterations: E2EIterationResult[] }> {
+  const {
+    promptOverride,
+    runTests = true,
+    maxIterations = 3,
+    rfFilter,
+    runTimeoutMs,
+  } = options;
+  const runCommand = options.runCommand ?? context.config.e2eRunCommand;
+
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   await fs.mkdir(outputRoot, { recursive: true });
 
-  const entries: RfEntry[] = extractOrBuildRfEntries(context);
+  let entries: RfEntry[] = extractOrBuildRfEntries(context);
+  if (rfFilter && rfFilter.length > 0) {
+    const wanted = new Set(rfFilter.map((id) => id.trim().toLowerCase()));
+    entries = entries.filter((e) => wanted.has(e.id.toLowerCase()));
+    if (entries.length === 0) {
+      throw new Error(
+        `Ningún RF coincide con rfFilter=[${rfFilter.join(", ")}]. ` +
+          "Revisa los ids de RF disponibles en rf-cu.md/openapi."
+      );
+    }
+  }
+
   const files: string[] = [];
+  const iterations: E2EIterationResult[] = [];
   const visitUrl = context.config.e2eBaseUrl ?? "/";
 
   const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
@@ -980,9 +1096,11 @@ export async function generateE2ETests(
   for (const entry of entries) {
     const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
     const fullPath = path.join(outputRoot, fileName);
+    const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
 
     const promptData = await loadE2EPrompt(context, entry, undefined, promptOverride);
     const frontendContext = buildRfFocusedBundle(sources, entry);
+
     const generationPrompt = buildE2EGenerationPrompt({
       entry,
       rules: promptData.text,
@@ -1002,7 +1120,350 @@ export async function generateE2ETests(
 
     await fs.writeFile(fullPath, sanitizeGeneratedSpec(generated), "utf8");
     files.push(fullPath);
+
+    if (!runTests) {
+      iterations.push({ rf: entry.id, file: fullPath, passed: false, attempts: 1 });
+      continue;
+    }
+
+    let passed = false;
+    let attempts = 0;
+    let lastOutput = "";
+
+    for (let attempt = 1; attempt <= maxIterations; attempt++) {
+      attempts = attempt;
+      await clearBaselineForRf(frontendRoot, entry.id);
+
+      const run = await runCypressSpec({
+        frontendRoot,
+        specRelPath,
+        runCommand,
+        timeoutMs: runTimeoutMs,
+      });
+      lastOutput = run.output;
+
+      if (run.passed) {
+        passed = true;
+        break;
+      }
+
+      if (attempt >= maxIterations) {
+        break;
+      }
+
+      const currentSpec = await fs.readFile(fullPath, "utf8");
+      const fixPrompt = buildE2EGenerationPrompt({
+        entry,
+        rules: promptData.text,
+        frontendContext,
+        visitUrl,
+        openApiContext,
+        promptOverride,
+        fix: {
+          currentSpec,
+          cypressOutput: extractCypressFailureSummary(run.output),
+          attempt,
+        },
+      });
+
+      const fixed = await sample(fixPrompt, 16000);
+      if (fixed && fixed.trim().length > 0) {
+        await fs.writeFile(fullPath, sanitizeGeneratedSpec(fixed), "utf8");
+      }
+    }
+
+    iterations.push({
+      rf: entry.id,
+      file: fullPath,
+      passed,
+      attempts,
+      lastOutput: passed ? undefined : extractCypressFailureSummary(lastOutput, 2000),
+    });
   }
 
-  return { files, rfCount: entries.length };
+  return { files, rfCount: entries.length, iterations };
 }
+
+export interface E2EFallbackSpec {
+  rf: string;
+  name: string;
+  /** Ruta absoluta donde el agente debe escribir el `.cy.ts`. */
+  filePath: string;
+  /** Ruta relativa al frontend para usar con `--spec`. */
+  specRelPath: string;
+  /** Prompt de generación (mismas reglas que el modo sampling). */
+  prompt: string;
+}
+
+export interface E2EFallbackResult {
+  specs: E2EFallbackSpec[];
+  /** Comando base para ejecutar Cypress (con `--spec`). */
+  runCommand: string;
+  /** Raíz del frontend desde donde ejecutar el comando. */
+  frontendRoot: string;
+  /** Nº de RF (en el ámbito) cuyo spec aún NO existe en disco. */
+  pendingCount: number;
+  /** Nº total de RF en el ámbito (tras aplicar rfFilter). */
+  totalCount: number;
+  /** true si TODOS los specs del ámbito ya existen en disco. */
+  allGenerated: boolean;
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Modo ASISTIDO (sin MCP sampling): prepara el entorno Cypress (helpers,
+ * config y baseline) y devuelve el prompt de generación + la ruta de salida
+ * para que el agente del propio cliente (Roo/Cline/opencode) genere el spec,
+ * lo escriba y lo ejecute. No requiere `createMessage`.
+ *
+ * Por defecto emite UN solo RF por llamada (el primero cuyo spec aún no existe)
+ * para acotar el tamaño del resultado: cada prompt incluye un bundle de código
+ * frontend grande y devolver todos a la vez desborda el contexto del cliente.
+ * Llamadas sucesivas van avanzando por los RF pendientes.
+ */
+export async function prepareE2EFallback(
+  context: LoadedContext,
+  options: GenerateE2EOptions & {
+    oneAtATime?: boolean;
+    bundleMaxChars?: number;
+    leanFrontend?: boolean;
+  } = {}
+): Promise<E2EFallbackResult> {
+  const { promptOverride, rfFilter, oneAtATime = false, bundleMaxChars, leanFrontend = false } = options;
+  const runCommand = options.runCommand ?? context.config.e2eRunCommand ?? "npx cypress run";
+
+  await ensureFrontendCypressSetup(context);
+  await writeBaselineAssets(context);
+
+  const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
+  await fs.mkdir(outputRoot, { recursive: true });
+
+  let entries: RfEntry[] = extractOrBuildRfEntries(context);
+  if (rfFilter && rfFilter.length > 0) {
+    const wanted = new Set(rfFilter.map((id) => id.trim().toLowerCase()));
+    entries = entries.filter((e) => wanted.has(e.id.toLowerCase()));
+    if (entries.length === 0) {
+      throw new Error(
+        `Ningún RF coincide con rfFilter=[${rfFilter.join(", ")}]. ` +
+          "Revisa los ids de RF disponibles en rf-cu.md/openapi."
+      );
+    }
+  }
+
+  const visitUrl = context.config.e2eBaseUrl ?? "/";
+  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const openApiContext = openApiSnippet(context.openApiContent);
+  const totalCount = entries.length;
+
+  const targets = await Promise.all(
+    entries.map(async (entry) => {
+      const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
+      const fullPath = path.join(outputRoot, fileName);
+      const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
+      return { entry, fullPath, specRelPath, exists: await fileExists(fullPath) };
+    })
+  );
+
+  const pending = targets.filter((t) => !t.exists);
+  const pendingCount = pending.length;
+  const allGenerated = pendingCount === 0;
+
+  const toEmit = oneAtATime ? pending.slice(0, 1) : targets;
+  const sources = toEmit.length > 0 ? await readFrontendSources(frontendRoot) : [];
+
+  const specs: E2EFallbackSpec[] = [];
+  for (const target of toEmit) {
+    const promptData = await loadE2EPrompt(context, target.entry, undefined, promptOverride);
+    const frontendContext = leanFrontend
+      ? buildRfFocusedFileList(sources, target.entry)
+      : buildRfFocusedBundle(sources, target.entry, bundleMaxChars);
+
+    const generationPrompt = buildE2EGenerationPrompt({
+      entry: target.entry,
+      rules: promptData.text,
+      frontendContext,
+      visitUrl,
+      openApiContext,
+      promptOverride,
+      frontendIsFileList: leanFrontend,
+    });
+
+    specs.push({
+      rf: target.entry.id,
+      name: target.entry.name,
+      filePath: target.fullPath,
+      specRelPath: target.specRelPath,
+      prompt: generationPrompt,
+    });
+  }
+
+  return { specs, runCommand, frontendRoot, pendingCount, totalCount, allGenerated };
+}
+
+export interface E2ERunFixResult {
+  rf: string;
+  name: string;
+  filePath: string;
+  specRelPath: string;
+  /** true si el spec pasó todos los `it()`. */
+  passed: boolean;
+  /** true si el fichero del spec no existe todavía (hay que generarlo antes). */
+  missing: boolean;
+  /** Extracto de la salida de Cypress (si falló). */
+  output?: string;
+  /** Prompt de corrección listo para el agente (si falló). */
+  fixPrompt?: string;
+}
+
+export interface E2ERunFallbackResult {
+  results: E2ERunFixResult[];
+  runCommand: string;
+  frontendRoot: string;
+}
+
+/**
+ * Modo ASISTIDO (sin MCP sampling): EJECUTA Cypress sobre los specs ya escritos
+ * y, para los que fallan, devuelve la salida real de Cypress + un prompt de
+ * corrección (fix) listo para que el agente reescriba el spec e itere. El
+ * servidor aporta la ejecución determinista (comando/rutas/limpieza de
+ * baseline); el agente aporta la generación/corrección con su propio modelo.
+ *
+ * Por defecto solo construye el PROMPT DE CORRECCIÓN para el PRIMER RF que
+ * falla (`oneFixAtATime`), para no desbordar el contexto del cliente: cada
+ * prompt incluye un bundle grande de código frontend. El estado (pasa/falla)
+ * se reporta para todos.
+ */
+export async function runE2EFallback(
+  context: LoadedContext,
+  options: GenerateE2EOptions & {
+    oneFixAtATime?: boolean;
+    bundleMaxChars?: number;
+    leanFrontend?: boolean;
+  } = {}
+): Promise<E2ERunFallbackResult> {
+  const {
+    promptOverride,
+    rfFilter,
+    runTimeoutMs,
+    oneFixAtATime = true,
+    bundleMaxChars,
+    leanFrontend = false,
+  } = options;
+  const runCommand = options.runCommand ?? context.config.e2eRunCommand ?? "npx cypress run";
+
+  const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
+  let entries: RfEntry[] = extractOrBuildRfEntries(context);
+  if (rfFilter && rfFilter.length > 0) {
+    const wanted = new Set(rfFilter.map((id) => id.trim().toLowerCase()));
+    entries = entries.filter((e) => wanted.has(e.id.toLowerCase()));
+    if (entries.length === 0) {
+      throw new Error(
+        `Ningún RF coincide con rfFilter=[${rfFilter.join(", ")}]. ` +
+          "Revisa los ids de RF disponibles en rf-cu.md/openapi."
+      );
+    }
+  }
+
+  const visitUrl = context.config.e2eBaseUrl ?? "/";
+  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const openApiContext = openApiSnippet(context.openApiContent);
+
+  interface Failure {
+    result: E2ERunFixResult;
+    entry: RfEntry;
+    currentSpec: string;
+    rawOutput: string;
+  }
+
+  const results: E2ERunFixResult[] = [];
+  const failures: Failure[] = [];
+
+  for (const entry of entries) {
+    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.ts`;
+    const fullPath = path.join(outputRoot, fileName);
+    const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
+
+    let currentSpec: string;
+    try {
+      currentSpec = await fs.readFile(fullPath, "utf8");
+    } catch {
+      results.push({
+        rf: entry.id,
+        name: entry.name,
+        filePath: fullPath,
+        specRelPath,
+        passed: false,
+        missing: true,
+      });
+      continue;
+    }
+
+    await clearBaselineForRf(frontendRoot, entry.id);
+    const run = await runCypressSpec({
+      frontendRoot,
+      specRelPath,
+      runCommand,
+      timeoutMs: runTimeoutMs,
+    });
+
+    if (run.passed) {
+      results.push({
+        rf: entry.id,
+        name: entry.name,
+        filePath: fullPath,
+        specRelPath,
+        passed: true,
+        missing: false,
+      });
+      continue;
+    }
+
+    const result: E2ERunFixResult = {
+      rf: entry.id,
+      name: entry.name,
+      filePath: fullPath,
+      specRelPath,
+      passed: false,
+      missing: false,
+      output: extractCypressFailureSummary(run.output, 2000),
+    };
+    results.push(result);
+    failures.push({ result, entry, currentSpec, rawOutput: run.output });
+  }
+
+  const failuresToFix = oneFixAtATime ? failures.slice(0, 1) : failures;
+  if (failuresToFix.length > 0) {
+    const sources = await readFrontendSources(frontendRoot);
+    for (const failure of failuresToFix) {
+      const promptData = await loadE2EPrompt(context, failure.entry, undefined, promptOverride);
+      const frontendContext = leanFrontend
+        ? buildRfFocusedFileList(sources, failure.entry)
+        : buildRfFocusedBundle(sources, failure.entry, bundleMaxChars);
+      failure.result.fixPrompt = buildE2EGenerationPrompt({
+        entry: failure.entry,
+        rules: promptData.text,
+        frontendContext,
+        visitUrl,
+        openApiContext,
+        promptOverride,
+        frontendIsFileList: leanFrontend,
+        fix: {
+          currentSpec: failure.currentSpec,
+          cypressOutput: extractCypressFailureSummary(failure.rawOutput),
+          attempt: 1,
+        },
+      });
+    }
+  }
+
+  return { results, runCommand, frontendRoot };
+}
+

@@ -16,6 +16,7 @@ const configSchema = z.object({
     e2e: z.string().min(1),
   }),
   e2eBaseUrl: z.string().min(1).optional(),
+  e2eRunCommand: z.string().min(1).optional(),
   openApi: z.string().min(1),
   appRouting: z.string().min(1).optional(),
   requirements: z.string().min(1).optional(),

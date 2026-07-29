@@ -327,16 +327,15 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
 }
 
 /**
- * Autocompleta rf-cu.md de forma genérica:
- *  - Infiere los RF a partir de los endpoints OpenAPI + rutas de enrutado.
- *  - Estima los CU delegando en el LLM del cliente (MCP sampling), que analiza
- *    el código frontend real. No usa plantillas ni heurísticas de dominio.
+ * Construye el prompt de autocompletado de rf-cu.md (RF desde endpoints
+ * OpenAPI + rutas de enrutado; CU inferidos del código frontend real) y
+ * resuelve la ruta de salida. No usa sampling: lo comparten el modo sampling
+ * (`autoCompleteRfCu`) y el modo ASISTIDO (fallback sin sampling).
  */
-export async function autoCompleteRfCu(
+export async function buildRfCuPrompt(
   context: LoadedContext,
-  sample: SampleFn,
   requirementsPathOverride?: string
-): Promise<{ outputPath: string; count: number }> {
+): Promise<{ outputPath: string; prompt: string }> {
   const configRoot = path.dirname(context.configPath);
   const outputPath = requirementsPathOverride
     ? path.resolve(process.cwd(), requirementsPathOverride)
@@ -360,6 +359,22 @@ export async function autoCompleteRfCu(
     FRONTEND_CODE: frontendCode,
     EXISTING_RFCU: existing && existing.length > 0 ? existing : "(no existe; genéralo desde cero)",
   });
+
+  return { outputPath, prompt };
+}
+
+/**
+ * Autocompleta rf-cu.md de forma genérica:
+ *  - Infiere los RF a partir de los endpoints OpenAPI + rutas de enrutado.
+ *  - Estima los CU delegando en el LLM del cliente (MCP sampling), que analiza
+ *    el código frontend real. No usa plantillas ni heurísticas de dominio.
+ */
+export async function autoCompleteRfCu(
+  context: LoadedContext,
+  sample: SampleFn,
+  requirementsPathOverride?: string
+): Promise<{ outputPath: string; count: number }> {
+  const { outputPath, prompt } = await buildRfCuPrompt(context, requirementsPathOverride);
 
   const generated = await sample(prompt, 8000);
   if (!generated || generated.trim().length === 0) {
