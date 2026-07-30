@@ -11,12 +11,14 @@ const configSchema = z.object({
     build: z.string().min(1),
   }),
   frontend: z.object({
-    root: z.string().min(1),
+    root: z.string().min(1).optional(),
     framework: z.string().min(1),
     e2e: z.string().min(1),
   }),
   e2eBaseUrl: z.string().min(1).optional(),
   e2eRunCommand: z.string().min(1).optional(),
+  e2eNodePath: z.string().min(1).optional(),
+  e2eEnv: z.record(z.string()).optional(),
   openApi: z.string().min(1),
   appRouting: z.string().min(1).optional(),
   requirements: z.string().min(1).optional(),
@@ -111,4 +113,19 @@ export async function loadContext(configPathInput?: string): Promise<LoadedConte
 export function resolveFromConfig(context: LoadedContext, maybeRelative: string): string {
   const configDir = path.dirname(context.configPath);
   return absoluteFrom(configDir, maybeRelative);
+}
+
+/**
+ * Resuelve la ruta absoluta del repositorio frontend. Lanza un error claro si
+ * `frontend.root` no está definido: las operaciones E2E (Cypress) lo requieren.
+ * La generación de rf-cu.md, en cambio, tolera su ausencia (modo OpenAPI-first).
+ */
+export function requireFrontendRoot(context: LoadedContext): string {
+  const root = context.config.frontend.root;
+  if (!root) {
+    throw new Error(
+      "Esta operación requiere 'frontend.root' en mcp.config.json (ruta del repositorio frontend con la UI a probar)."
+    );
+  }
+  return absoluteFrom(path.dirname(context.configPath), root);
 }

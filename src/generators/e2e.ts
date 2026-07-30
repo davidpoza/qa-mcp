@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext, RfEntry } from "../types";
+import { requireFrontendRoot } from "../config";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
 import { runCypressSpec, extractCypressFailureSummary } from "./cypress-runner";
@@ -10,6 +11,29 @@ function slug(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+/** Valor por defecto del NO_PROXY para entornos internos de AENA. */
+const DEFAULT_E2E_NO_PROXY = "localhost,127.0.0.1,.aena.es";
+/** Directorio de node por defecto (instalación nvm de AENA). */
+const DEFAULT_E2E_NODE_PATH = "C:\\Users\\aena\\AppData\\Roaming\\nvm\\v24.16.0";
+
+/**
+ * Resuelve el directorio de node y las variables de entorno extra para ejecutar
+ * Cypress, combinando los valores de la config con los defaults de AENA. El
+ * NO_PROXY por defecto se aplica salvo que la config lo sobreescriba.
+ */
+function resolveE2ERuntime(context: LoadedContext): {
+  nodePath: string | undefined;
+  env: Record<string, string>;
+} {
+  const nodePath = context.config.e2eNodePath ?? DEFAULT_E2E_NODE_PATH;
+  const env: Record<string, string> = {
+    NO_PROXY: DEFAULT_E2E_NO_PROXY,
+    no_proxy: DEFAULT_E2E_NO_PROXY,
+    ...(context.config.e2eEnv ?? {}),
+  };
+  return { nodePath, env };
 }
 
 function openApiSnippet(content: string): string {
@@ -387,6 +411,12 @@ function buildE2EGenerationPrompt(params: {
   const method = entry.methodPath.split(/\s+/)[0] ?? "GET";
   const endpointPath = endpointPathFromMethodPath(entry.methodPath);
   const glob = interceptGlobFromPath(endpointPath);
+  const isUiOnly =
+    /acción de UI|sin endpoint directo/i.test(entry.methodPath) ||
+    /^ui-/i.test(entry.operationId);
+  const endpointLine = isUiOnly
+    ? `- Acción de UI SIN endpoint directo (${entry.operationId}). NO asumas una petición de API concreta: verifica el efecto OBSERVABLE en la UI (descarga/exportación, cálculo o validación en cliente, navegación, cambios de estado). Usa \`cy.intercept\` SOLO si al inspeccionar el código descubres una llamada real involucrada.`
+    : `- Endpoint asociado: \`${entry.methodPath}\` (operationId: \`${entry.operationId}\`).\n- Patrón de intercept sugerido: \`cy.intercept("${method}", "${glob}")\` (agnóstico al host).`;
 
   return [
     fix
@@ -394,8 +424,7 @@ function buildE2EGenerationPrompt(params: {
       : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE en JavaScript PLANO (`.cy.js`) para el siguiente Requisito Funcional y sus Casos de Uso.",
     "",
     `## Requisito funcional: ${entry.id} — ${entry.name}`,
-    `- Endpoint asociado: \`${entry.methodPath}\` (operationId: \`${entry.operationId}\`).`,
-    `- Patrón de intercept sugerido: \`cy.intercept("${method}", "${glob}")\` (agnóstico al host).`,
+    endpointLine,
     `- URL de arranque para \`cy.visit\`: ${visitUrl}`,
     "",
     "## Casos de uso a implementar (un `it()` por CU, con su clave de baseline exacta):",
@@ -868,7 +897,7 @@ function buildE2EHelpersFile(): string {
 
 async function writeBaselineAssets(context: LoadedContext): Promise<void> {
   const configRoot = path.dirname(context.configPath);
-  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const supportPath = path.resolve(frontendRoot, baselineSupportRelativePath);
   const helpersPath = path.resolve(frontendRoot, "cypress", "support", "e2e-helpers.js");
   const fixturesPath = path.resolve(frontendRoot, baselineFixtureRelativePath);
@@ -954,7 +983,7 @@ function injectBaselineTasksIntoConfig(configContent: string): string {
 
 async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void> {
   const configRoot = path.dirname(context.configPath);
-  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const packageJsonPath = path.resolve(frontendRoot, "package.json");
   const cypressConfigPath = path.resolve(frontendRoot, "cypress.config.js");
 
@@ -1090,7 +1119,7 @@ export async function generateE2ETests(
   const iterations: E2EIterationResult[] = [];
   const visitUrl = context.config.e2eBaseUrl ?? "/";
 
-  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const sources = await readFrontendSources(frontendRoot);
   const openApiContext = openApiSnippet(context.openApiContent);
 
@@ -1140,6 +1169,7 @@ export async function generateE2ETests(
         specRelPath,
         runCommand,
         timeoutMs: runTimeoutMs,
+        ...resolveE2ERuntime(context),
       });
       lastOutput = run.output;
 
@@ -1202,12 +1232,23 @@ export interface E2EFallbackResult {
   runCommand: string;
   /** Raíz del frontend desde donde ejecutar el comando. */
   frontendRoot: string;
-  /** Nº de RF (en el ámbito) cuyo spec aún NO existe en disco. */
+  /** Nº de RF (en el ámbito) que aún NO están en verde. */
   pendingCount: number;
   /** Nº total de RF en el ámbito (tras aplicar rfFilter). */
   totalCount: number;
+  /** Nº de RF (en el ámbito) ya en verde (según estado en disco). */
+  greenCount: number;
   /** true si TODOS los specs del ámbito ya existen en disco. */
   allGenerated: boolean;
+  /**
+   * Siguiente acción del bucle RF-a-RF (modo `untilGreen`):
+   * - `generate`: el RF actual no tiene spec; el agente debe generarlo (ver `specs[0]`).
+   * - `run`: el RF actual ya tiene spec pero no está verde; ejecútalo con `runE2ETests`.
+   * - `done`: todos los RF del ámbito están en verde.
+   */
+  nextAction: "generate" | "run" | "done";
+  /** RF en curso (el primero no verde), para los mensajes de los modos `run`/`generate`. */
+  current?: { rf: string; name: string; filePath: string; specRelPath: string };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -1217,6 +1258,42 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Ruta del fichero de estado (qué RF están en verde) dentro del dir de specs. */
+function e2eStatusPath(outputRoot: string): string {
+  return path.join(outputRoot, ".qa-mcp-e2e-status.json");
+}
+
+interface E2EStatusEntry {
+  green: boolean;
+  at: string;
+}
+
+/**
+ * Lee el estado persistido de los RF (verde/no verde). El estado vive en disco
+ * (no en la conversación del cliente) para que el flujo RF-a-RF sea reanudable
+ * desde una tarea NUEVA con contexto limpio: el servidor sabe por qué RF seguir.
+ */
+async function readE2EStatus(outputRoot: string): Promise<Record<string, E2EStatusEntry>> {
+  const raw = await readTextIfExists(e2eStatusPath(outputRoot));
+  if (!raw) return {};
+  try {
+    const data = JSON.parse(raw) as Record<string, E2EStatusEntry>;
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function isRfGreen(status: Record<string, E2EStatusEntry>, rfId: string): boolean {
+  return Boolean(status[rfId.toLowerCase()]?.green);
+}
+
+async function setRfGreen(outputRoot: string, rfId: string, green: boolean): Promise<void> {
+  const status = await readE2EStatus(outputRoot);
+  status[rfId.toLowerCase()] = { green, at: new Date().toISOString() };
+  await fs.writeFile(e2eStatusPath(outputRoot), `${JSON.stringify(status, null, 2)}\n`, "utf8");
 }
 
 /**
@@ -1236,9 +1313,17 @@ export async function prepareE2EFallback(
     oneAtATime?: boolean;
     bundleMaxChars?: number;
     leanFrontend?: boolean;
+    untilGreen?: boolean;
   } = {}
 ): Promise<E2EFallbackResult> {
-  const { promptOverride, rfFilter, oneAtATime = false, bundleMaxChars, leanFrontend = false } = options;
+  const {
+    promptOverride,
+    rfFilter,
+    oneAtATime = false,
+    bundleMaxChars,
+    leanFrontend = false,
+    untilGreen = false,
+  } = options;
   const runCommand = options.runCommand ?? context.config.e2eRunCommand ?? "npx cypress run";
 
   await ensureFrontendCypressSetup(context);
@@ -1260,18 +1345,105 @@ export async function prepareE2EFallback(
   }
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
-  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const openApiContext = openApiSnippet(context.openApiContent);
   const totalCount = entries.length;
+  const status = await readE2EStatus(outputRoot);
 
   const targets = await Promise.all(
     entries.map(async (entry) => {
       const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
       const fullPath = path.join(outputRoot, fileName);
       const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
-      return { entry, fullPath, specRelPath, exists: await fileExists(fullPath) };
+      return {
+        entry,
+        fullPath,
+        specRelPath,
+        exists: await fileExists(fullPath),
+        green: isRfGreen(status, entry.id),
+      };
     })
   );
+
+  const greenCount = targets.filter((t) => t.green).length;
+
+  // Modo RF-a-RF-hasta-verde: el "RF en curso" es el primero que NO está verde.
+  // Si su spec no existe → hay que generarlo; si existe → hay que ejecutarlo.
+  if (untilGreen) {
+    const notGreen = targets.filter((t) => !t.green);
+    const pendingCount = notGreen.length;
+    const current = notGreen[0];
+
+    if (!current) {
+      return {
+        specs: [],
+        runCommand,
+        frontendRoot,
+        pendingCount: 0,
+        totalCount,
+        greenCount,
+        allGenerated: true,
+        nextAction: "done",
+      };
+    }
+
+    const currentInfo = {
+      rf: current.entry.id,
+      name: current.entry.name,
+      filePath: current.fullPath,
+      specRelPath: current.specRelPath,
+    };
+
+    if (current.exists) {
+      // Ya generado pero no verde: no regenerar; el siguiente paso es ejecutarlo.
+      return {
+        specs: [],
+        runCommand,
+        frontendRoot,
+        pendingCount,
+        totalCount,
+        greenCount,
+        allGenerated: targets.every((t) => t.exists),
+        nextAction: "run",
+        current: currentInfo,
+      };
+    }
+
+    const sources = await readFrontendSources(frontendRoot);
+    const promptData = await loadE2EPrompt(context, current.entry, undefined, promptOverride);
+    const frontendContext = leanFrontend
+      ? buildRfFocusedFileList(sources, current.entry)
+      : buildRfFocusedBundle(sources, current.entry, bundleMaxChars);
+    const generationPrompt = buildE2EGenerationPrompt({
+      entry: current.entry,
+      rules: promptData.text,
+      frontendContext,
+      visitUrl,
+      openApiContext,
+      promptOverride,
+      frontendIsFileList: leanFrontend,
+    });
+
+    return {
+      specs: [
+        {
+          rf: current.entry.id,
+          name: current.entry.name,
+          filePath: current.fullPath,
+          specRelPath: current.specRelPath,
+          prompt: generationPrompt,
+        },
+      ],
+      runCommand,
+      frontendRoot,
+      pendingCount,
+      totalCount,
+      greenCount,
+      allGenerated: targets.every((t) => t.exists),
+      nextAction: "generate",
+      current: currentInfo,
+    };
+  }
 
   const pending = targets.filter((t) => !t.exists);
   const pendingCount = pending.length;
@@ -1306,7 +1478,16 @@ export async function prepareE2EFallback(
     });
   }
 
-  return { specs, runCommand, frontendRoot, pendingCount, totalCount, allGenerated };
+  return {
+    specs,
+    runCommand,
+    frontendRoot,
+    pendingCount,
+    totalCount,
+    greenCount,
+    allGenerated,
+    nextAction: allGenerated ? "done" : "generate",
+  };
 }
 
 export interface E2ERunFixResult {
@@ -1328,6 +1509,20 @@ export interface E2ERunFallbackResult {
   results: E2ERunFixResult[];
   runCommand: string;
   frontendRoot: string;
+  /** Nº total de RF en el ámbito (tras aplicar rfFilter). */
+  totalCount?: number;
+  /** Nº de RF en verde (según estado en disco) tras esta ejecución. */
+  greenCount?: number;
+  /** true si todos los RF del ámbito están en verde. */
+  allGreen?: boolean;
+  /**
+   * Siguiente acción del bucle RF-a-RF (modo `untilGreen`):
+   * - `fix`: el RF en curso ha fallado; reescríbelo y vuelve a llamar a `runE2ETests`.
+   * - `next`: el RF en curso ha pasado; inicia tarea NUEVA y llama a `generateE2ETests`.
+   * - `generate`: el RF en curso no tiene spec; genéralo con `generateE2ETests`.
+   * - `done`: todos los RF del ámbito están en verde.
+   */
+  nextAction?: "fix" | "next" | "generate" | "done";
 }
 
 /**
@@ -1348,6 +1543,7 @@ export async function runE2EFallback(
     oneFixAtATime?: boolean;
     bundleMaxChars?: number;
     leanFrontend?: boolean;
+    untilGreen?: boolean;
   } = {}
 ): Promise<E2ERunFallbackResult> {
   const {
@@ -1357,6 +1553,7 @@ export async function runE2EFallback(
     oneFixAtATime = true,
     bundleMaxChars,
     leanFrontend = false,
+    untilGreen = false,
   } = options;
   const runCommand = options.runCommand ?? context.config.e2eRunCommand ?? "npx cypress run";
 
@@ -1374,8 +1571,30 @@ export async function runE2EFallback(
   }
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
-  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const openApiContext = openApiSnippet(context.openApiContent);
+
+  const scopeCount = entries.length;
+  const status = await readE2EStatus(outputRoot);
+  const priorGreen = entries.filter((e) => isRfGreen(status, e.id)).length;
+
+  // Modo RF-a-RF-hasta-verde: ejecuta SOLO el RF en curso (el primero no verde,
+  // o el indicado por rfFilter), para acotar la salida y el contexto del cliente.
+  if (untilGreen) {
+    const target = entries.find((e) => !isRfGreen(status, e.id));
+    if (!target) {
+      return {
+        results: [],
+        runCommand,
+        frontendRoot,
+        totalCount: scopeCount,
+        greenCount: priorGreen,
+        allGreen: true,
+        nextAction: "done",
+      };
+    }
+    entries = [target];
+  }
 
   interface Failure {
     result: E2ERunFixResult;
@@ -1413,9 +1632,11 @@ export async function runE2EFallback(
       specRelPath,
       runCommand,
       timeoutMs: runTimeoutMs,
+      ...resolveE2ERuntime(context),
     });
 
     if (run.passed) {
+      await setRfGreen(outputRoot, entry.id, true);
       results.push({
         rf: entry.id,
         name: entry.name,
@@ -1427,6 +1648,7 @@ export async function runE2EFallback(
       continue;
     }
 
+    await setRfGreen(outputRoot, entry.id, false);
     const result: E2ERunFixResult = {
       rf: entry.id,
       name: entry.name,
@@ -1463,6 +1685,34 @@ export async function runE2EFallback(
         },
       });
     }
+  }
+
+  if (untilGreen) {
+    const status2 = await readE2EStatus(outputRoot);
+    const allEntries = extractOrBuildRfEntries(context);
+    const scopeEntries =
+      rfFilter && rfFilter.length > 0
+        ? allEntries.filter((e) => rfFilter.map((id) => id.toLowerCase()).includes(e.id.toLowerCase()))
+        : allEntries;
+    const greenCount = scopeEntries.filter((e) => isRfGreen(status2, e.id)).length;
+    const single = results[0];
+    let nextAction: E2ERunFallbackResult["nextAction"];
+    if (single?.missing) {
+      nextAction = "generate";
+    } else if (single?.passed) {
+      nextAction = greenCount >= scopeCount ? "done" : "next";
+    } else {
+      nextAction = "fix";
+    }
+    return {
+      results,
+      runCommand,
+      frontendRoot,
+      totalCount: scopeCount,
+      greenCount,
+      allGreen: greenCount >= scopeCount,
+      nextAction,
+    };
   }
 
   return { results, runCommand, frontendRoot };

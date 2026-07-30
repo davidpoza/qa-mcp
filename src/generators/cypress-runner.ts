@@ -27,11 +27,20 @@ export async function runCypressSpec(params: {
   specRelPath: string;
   runCommand?: string;
   timeoutMs?: number;
+  /** Directorio que contiene node.exe/npx; se antepone al PATH del proceso. */
+  nodePath?: string;
+  /** Variables de entorno adicionales (p. ej. NO_PROXY) para la ejecución. */
+  env?: Record<string, string>;
 }): Promise<CypressRunResult> {
-  const { frontendRoot, specRelPath } = params;
+  const { frontendRoot, specRelPath, nodePath } = params;
   const runCommand = params.runCommand ?? "npx cypress run";
   const timeoutMs = params.timeoutMs ?? 300000;
   const fullCommand = `${runCommand} --spec "${specRelPath}" --reporter spec`;
+
+  const extraEnv = params.env ?? {};
+  const pathSeparator = process.platform === "win32" ? ";" : ":";
+  const basePath = process.env.PATH ?? process.env.Path ?? "";
+  const mergedPath = nodePath ? `${nodePath}${pathSeparator}${basePath}` : basePath;
 
   return new Promise<CypressRunResult>((resolve) => {
     let output = "";
@@ -48,9 +57,12 @@ export async function runCypressSpec(params: {
       shell: true,
       env: {
         ...process.env,
+        PATH: mergedPath,
+        Path: mergedPath,
         NO_COLOR: "1",
         CYPRESS_NO_COLOR: "1",
         FORCE_COLOR: "0",
+        ...extraEnv,
       },
     });
 

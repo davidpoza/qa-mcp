@@ -18,13 +18,42 @@ Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP s
 - `autoCompleteRfCu` **devuelve el prompt** y la ruta de salida para que el agente genere y escriba `rf-cu.md`.
 - El modo asistido se activa **automáticamente** al detectar la falta de sampling. También puedes forzarlo con el parámetro `assisted: true` en la invocación.
 
-**Bucle de auto-corrección en modo asistido (`runE2ETests`):** aunque el cliente no tenga sampling, el servidor **sí puede ejecutar Cypress** y devolver el resultado como feedback. Flujo:
-1. `generateE2ETests` (modo asistido) → el agente genera y escribe cada `.cy.js` (uno por llamada) hasta que no queden pendientes.
-2. `runE2ETests` (params: `rfFilter?`, `promptOverride?`) → el servidor **ejecuta Cypress** (limpiando el baseline entre intentos), reporta el estado de todos los RF y devuelve, para **UN** RF que falla, la **salida real de Cypress** + un **PROMPT DE CORRECCIÓN** ya construido.
-3. El agente aplica ese prompt reescribiendo el fichero y **vuelve a llamar** a `runE2ETests`; recibirá el siguiente RF que falle.
-4. Repetir hasta que `runE2ETests` reporte todos los RF en verde.
+**Bucle de auto-corrección en modo asistido (`runE2ETests`), RF a RF hasta verde:** aunque el cliente no tenga sampling, el servidor **sí puede ejecutar Cypress** y devolver el resultado como feedback. El flujo trabaja **un RF en curso cada vez** (el primero que no está en verde) y **no avanza al siguiente hasta que el actual pasa**:
+1. `generateE2ETests` (modo asistido) → devuelve el prompt de generación del **RF en curso** (si su `.cy.js` no existe). El agente lo escribe.
+2. `runE2ETests` → el servidor **ejecuta SOLO ese RF** (limpiando el baseline entre intentos). Si pasa, lo **marca en verde** (estado persistido en disco) y te indica avanzar; si falla, devuelve la **salida real de Cypress** + un **PROMPT DE CORRECCIÓN**.
+3. El agente aplica el prompt reescribiendo el fichero y **vuelve a llamar** a `runE2ETests` (mismo RF) hasta que pase.
+4. Con el RF en verde, se llama de nuevo a `generateE2ETests` para el **siguiente** RF. Repetir hasta que todos estén en verde.
 
-Así el servidor aporta la ejecución determinista y el feedback; el agente aporta la generación/corrección con su propio modelo. En clientes CON sampling no hace falta: `generateE2ETests` ya ejecuta e itera solo.
+**Contexto limpio por RF:** todo el estado vive en **disco** (los `.cy.js` + `.qa-mcp-e2e-status.json` con los RF en verde), no en la conversación del cliente. Por eso el bucle es **reanudable desde una tarea nueva**: cuando el contexto del cliente empiece a llenarse (p. ej. al llegar a RF-10/RF-11), **inicia una tarea nueva** y vuelve a llamar a `generateE2ETests`; el servidor detecta el siguiente RF pendiente automáticamente y continúa desde ahí con contexto limpio. Cada llamada emite solo el RF en curso (frontend como lista de rutas, no código embebido) para minimizar el footprint.
+
+**Automatizar el contexto limpio con subtasks (Roo Code / Orchestrator):** en clientes con orquestación de subtasks (Boomerang / Orchestrator, p. ej. **Roo Code**), no hace falta iniciar la tarea nueva a mano. Cada respuesta de `generateE2ETests` / `runE2ETests` incluye una **`SEÑAL DE SUBTASK`** con un campo `QUEDA_TRABAJO` (sí/no) y la instrucción de si seguir en el mismo subtask o delegar el siguiente RF en un `new_task` con contexto limpio. Como todo el estado está en disco, cada subtask arranca limpio y el servidor resuelve solo el RF pendiente.
+
+> **IMPORTANTE — modos de Roo y acceso MCP:** el modo **Orchestrator NO tiene acceso directo a tools MCP** (solo delega vía `new_task`); si le pides que llame a `autoCompleteRfCu`/`generateE2ETests` directamente, responderá que *"no es una tool reconocida"*. La llamada a la tool debe ocurrir **dentro del subtask**, en un modo con el grupo `mcp` **y** `edit`. Usa **modo Code** (`mode: "code"`) para los subtasks: como Roo no soporta sampling, las tools corren en modo asistido y el agente debe **escribir** los ficheros (`rf-cu.md`, `.cy.js`), así que hace falta editar. (Architect solo edita markdown; Ask no edita.)
+
+Prompt listo para pegar en la **tarea padre** (Roo en modo Orchestrator):
+
+```
+Eres el orquestador del bucle E2E de qa-mcp. Objetivo: dejar TODOS los RF en verde,
+un RF por subtask, para no llenar el contexto.
+
+Repite este ciclo:
+1. Crea un new_task EN MODO CODE (mode: "code") con contexto limpio y este objetivo
+   (el modo Code es obligatorio: tiene acceso a las tools MCP y puede escribir ficheros;
+   tú, como Orchestrator, NO puedes llamar a las tools qa-mcp directamente):
+   "Continúa el bucle E2E del siguiente RF pendiente de qa-mcp: llama a la tool
+    generateE2ETests, escribe el .cy.js en la ruta EXACTA que indique, llama a
+    runE2ETests e itera (reescribe + runE2ETests) hasta que ESE RF pase. El RF
+    pendiente y el estado se resuelven solos desde disco. Cuando el RF esté en
+    verde, termina con attempt_completion. Si la tool responde que TODOS los RF
+    están en verde, indícalo y no hagas nada más."
+2. Cuando el subtask termine, lee su resultado.
+3. Si el resultado indica que quedan RF (QUEDA_TRABAJO: sí), vuelve al paso 1.
+4. Si indica que TODOS los RF están en verde (QUEDA_TRABAJO: no), termina.
+
+No generes ni ejecutes tests tú mismo: delega SIEMPRE cada RF en un subtask en modo Code.
+```
+
+En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `generateE2ETests` ya genera, ejecuta e itera RF a RF por sí misma.
 
 **Ejecución iterativa (auto-fix):** por defecto, tras generar la primera versión de cada spec, `generateE2ETests` **ejecuta Cypress** sobre ese fichero y, si algún `it()` falla, vuelve a pedir al modelo que **corrija el spec usando la salida de error real de Cypress**, repitiendo hasta que todos los tests pasen o se agoten los intentos. Parámetros de la tool:
 - `runTests` (bool, por defecto `true`): ejecuta Cypress e itera. Ponlo a `false` para solo generar.
@@ -33,11 +62,12 @@ Así el servidor aporta la ejecución determinista y el feedback; el agente apor
 - `promptOverride` (string, opcional).
 Entre cada intento se limpian las claves de baseline del RF en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe con qué RF pasan/fallan y, para los que fallan, un extracto de la salida de Cypress.
 
-Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio):
-- Los **RF** se infieren de los endpoints de OpenAPI + las rutas de `appRouting`.
+Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio) y es **UI-first**: los RF/CU describen **lo que el usuario puede reproducir DESDE LA UI**, no la API completa.
+- **Con `frontend.root` configurado (modo UI-first):** los **RF** se derivan de lo que la UI expone (rutas de `appRouting`, componentes/pantallas y acciones que el usuario puede disparar) y los **CU** son los flujos concretos ejercitables desde la interfaz. OpenAPI se usa **solo como referencia** para entender el comportamiento, **no** como checklist de cobertura: no se crea un RF por endpoint ni se prueban casos que la UI no permite. La cobertura exhaustiva de la API es tarea de `generateRestTests`.
+- **Sin `frontend.root` (modo fallback OpenAPI-first):** `frontend.root` es **opcional**; si no se define, no hay UI que analizar y los **RF se infieren directamente de los endpoints de OpenAPI** (un RF por operación/funcionalidad relevante), con CU a nivel de comportamiento esperado del endpoint.
 - Los **CU** los **estima el modelo del cliente** analizando el código frontend real (componentes, plantillas, servicios), vía **MCP sampling** (`sampling/createMessage`).
 - Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+). Sin sampling, la tool devuelve el prompt para que el agente del cliente genere y escriba `rf-cu.md` (modo asistido; ver arriba).
-- El prompt de instrucciones está externalizado en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP. (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP.
+- El prompt de instrucciones está externalizado en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP.
 - Si ya existe un `rf-cu.md` parcial, se completa respetando lo ya definido.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
@@ -88,6 +118,8 @@ Y elimina `qa-mcp` de la configuración global (**MCP: Open User Configuration**
 1. En el proyecto a documentar, crea/ajusta `mcp.config.json` en su raíz con rutas de backend, frontend, OpenAPI y salidas de tests/evidencias.
    - Si quieres controlar explícitamente de dónde derivar CU, añade `appRouting` con la ruta del `app-routing.module.ts`.
    - Para fijar la URL de ejecución E2E, añade `e2eBaseUrl` (ej. `https://mi-entorno.aena.es`).
+   - Para ejecutar Cypress con un Node concreto (p. ej. instalación nvm), añade `e2eNodePath` con el directorio que contiene `node.exe`/`npx` (por defecto `C:\Users\aena\AppData\Roaming\nvm\v24.16.0`); se antepone al `PATH` de la ejecución de Cypress.
+   - Para pasar variables de entorno a la ejecución de Cypress (proxy, etc.), añade `e2eEnv` como objeto clave/valor. Por defecto se establece `NO_PROXY=localhost,127.0.0.1,.aena.es`; puedes sobreescribirlo o añadir más variables. Ej.: `"e2eEnv": { "NO_PROXY": "localhost,127.0.0.1,.aena.es", "HTTP_PROXY": "" }`.
 2. En VS Code Copilot, configura y arranca el servidor MCP `qa-mcp` con `cwd` apuntando a ese proyecto.
 3. En Copilot Chat (modo Agent), ejecuta las tools según necesidad:
    - `autoCompleteRfCu`: completa `rf-cu.md`. Infiere RF desde OpenAPI + `appRouting` y estima los CU con el LLM del cliente (MCP sampling) analizando el frontend.

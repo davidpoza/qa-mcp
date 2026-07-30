@@ -141,7 +141,7 @@ function extractOpenApiTitle(openApiContent: string): string | undefined {
   return match[1].replace(/^["']|["']$/g, "").trim() || undefined;
 }
 
-function resolveRoutingPath(context: LoadedContext): string {
+function resolveRoutingPath(context: LoadedContext): string | undefined {
   const configRoot = path.dirname(context.configPath);
   if (context.config.appRouting) {
     if (path.isAbsolute(context.config.appRouting)) {
@@ -149,11 +149,17 @@ function resolveRoutingPath(context: LoadedContext): string {
     }
     return path.resolve(configRoot, context.config.appRouting);
   }
+  if (!context.config.frontend.root) {
+    return undefined;
+  }
   const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
   return path.join(frontendRoot, "src", "app", "app-routing.module.ts");
 }
 
-async function tryReadRoutes(routingPath: string): Promise<string[]> {
+async function tryReadRoutes(routingPath: string | undefined): Promise<string[]> {
+  if (!routingPath) {
+    return [];
+  }
   try {
     const content = await fs.readFile(routingPath, "utf8");
     const matches = [...content.matchAll(/path:\s*['"`]([^'"`]*)['"`]/g)];
@@ -344,16 +350,30 @@ export async function buildRfCuPrompt(
   const endpoints = parseOpenApiEndpoints(context.openApiContent);
   const routingPath = resolveRoutingPath(context);
   const routes = await tryReadRoutes(routingPath);
-  const frontendRoot = path.resolve(configRoot, context.config.frontend.root);
-  const frontendCode = await buildFrontendCodeBundle(frontendRoot);
+  const hasFrontend = Boolean(context.config.frontend.root);
+  const frontendRoot = hasFrontend
+    ? path.resolve(configRoot, context.config.frontend.root as string)
+    : undefined;
+  const frontendCode = frontendRoot
+    ? await buildFrontendCodeBundle(frontendRoot)
+    : "(no se configuró frontend.root en mcp.config.json; no hay código de UI que analizar)";
   const existing = (await readTextIfExists(outputPath))?.trim();
+
+  const frontSource = routes.length > 0 && routingPath
+    ? routingPath
+    : frontendRoot ?? "(sin frontend; RF derivados de OpenAPI)";
+
+  const modeNote = hasFrontend
+    ? "MODO UI-FIRST: hay frontend configurado (`frontend.root`). Deriva los RF y CU de lo que el usuario puede reproducir DESDE LA UI (rutas, componentes, acciones); usa OpenAPI SOLO como referencia. NO cubras endpoints que la UI no invoca."
+    : "MODO SIN FRONTEND (fallback): NO se definió `frontend.root` en mcp.config.json, así que NO hay UI que analizar. En este caso INFIERE los RF DIRECTAMENTE a partir de los endpoints de OpenAPI (normalmente un RF por operación relevante, agrupando por recurso/funcionalidad) y define CU verificables a nivel de comportamiento esperado de cada endpoint (nominal, validación/errores 4xx, vacío/404). La trazabilidad RF↔endpoint es directa. Ignora las secciones de UI/rutas de abajo si vienen vacías.";
 
   const scope = extractOpenApiTitle(context.openApiContent) ?? "General";
   const promptTemplate = await loadRfCuPrompt(context);
   const prompt = fillPromptTemplate(promptTemplate, {
+    MODE_NOTE: modeNote,
     SCOPE: scope,
     OPENAPI_SOURCE: context.openApiPath,
-    FRONT_SOURCE: routes.length > 0 ? routingPath : frontendRoot,
+    FRONT_SOURCE: frontSource,
     OPENAPI_ENDPOINTS: formatEndpointsForPrompt(endpoints),
     ROUTES: formatRoutesForPrompt(routes),
     FRONTEND_CODE: frontendCode,
@@ -376,7 +396,7 @@ export async function autoCompleteRfCu(
 ): Promise<{ outputPath: string; count: number }> {
   const { outputPath, prompt } = await buildRfCuPrompt(context, requirementsPathOverride);
 
-  const generated = await sample(prompt, 8000);
+  const generated = await sample(prompt, 16000);
   if (!generated || generated.trim().length === 0) {
     throw new Error(
       "El modelo no devolvió contenido para rf-cu.md. Verifica que el cliente MCP soporte sampling (createMessage)."

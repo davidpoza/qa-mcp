@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext, RfEntry } from "../types";
+import { requireFrontendRoot } from "../config";
 
 export interface PromptContext {
   rfId: string;
@@ -19,7 +20,7 @@ function resolvePromptPath(context: LoadedContext): string {
 }
 
 function interpolatePrompt(template: string, context: LoadedContext, promptContext: PromptContext): string {
-  const frontendRoot = path.resolve(path.dirname(context.configPath), context.config.frontend.root);
+  const frontendRoot = requireFrontendRoot(context);
   const replacements: Record<string, string> = {
     openApiPath: context.openApiPath,
     frontendRoot,

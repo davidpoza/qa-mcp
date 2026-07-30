@@ -5,7 +5,7 @@ export interface BackendConfig {
 }
 
 export interface FrontendConfig {
-  root: string;
+  root?: string;
   framework: string;
   e2e: string;
 }
@@ -27,6 +27,8 @@ export interface McpQaConfig {
   frontend: FrontendConfig;
   e2eBaseUrl?: string;
   e2eRunCommand?: string;
+  e2eNodePath?: string;
+  e2eEnv?: Record<string, string>;
   openApi: string;
   appRouting?: string;
   requirements?: string;
