@@ -4,7 +4,7 @@ import { LoadedContext, RfEntry } from "../types";
 import { requireFrontendRoot } from "../config";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
-import { runCypressSpec, extractCypressFailureSummary } from "./cypress-runner";
+import { runCypressSpec, extractCypressFailureSummary, isCypressCacheError, repairCypressCache, CypressRunResult } from "./cypress-runner";
 
 function slug(value: string): string {
   return value
@@ -34,6 +34,61 @@ function resolveE2ERuntime(context: LoadedContext): {
     ...(context.config.e2eEnv ?? {}),
   };
   return { nodePath, env };
+}
+
+/**
+ * Ejecuta un spec de Cypress y, si detecta el error de caché V8 corrupta
+ * (`cachedDataRejected` — un problema de ENTORNO, no del spec), repara la caché
+ * del binario UNA vez y reintenta. Marca `cacheError` si tras reparar sigue
+ * fallando por lo mismo, para que el flujo NO intente reescribir el test.
+ */
+async function runCypressSpecWithRepair(params: {
+  frontendRoot: string;
+  specRelPath: string;
+  runCommand?: string;
+  timeoutMs?: number;
+  nodePath?: string;
+  env?: Record<string, string>;
+}): Promise<CypressRunResult & { cacheError?: boolean }> {
+  const first = await runCypressSpec(params);
+  if (first.passed || !isCypressCacheError(first.output)) {
+    return first;
+  }
+  const repair = await repairCypressCache({
+    frontendRoot: params.frontendRoot,
+    nodePath: params.nodePath,
+    env: params.env,
+  });
+  const second = await runCypressSpec(params);
+  if (second.passed) {
+    return second;
+  }
+  if (isCypressCacheError(second.output)) {
+    return {
+      ...second,
+      cacheError: true,
+      output: `${second.output}\n\n[qa-mcp] La reparación automática de la caché de Cypress no resolvió el error. Salida de la reparación:\n${extractCypressFailureSummary(repair.output, 3000)}`,
+    };
+  }
+  return second;
+}
+
+/**
+ * Mensaje para el flujo de ejecución cuando Cypress falla por caché corrupta.
+ * NO es un fallo del spec: hay que reparar el entorno, no reescribir el test.
+ */
+function cypressCacheErrorNotice(nodePath: string | undefined): string {
+  return [
+    "⚠️ ERROR DE ENTORNO (NO del spec): Cypress no arranca por caché V8 corrupta/incompatible (`cachedDataRejected`).",
+    "Esto ocurre al cambiar la versión de Node respecto a la que verificó Cypress. NO reescribas el spec: no lo soluciona.",
+    "La reparación automática (cache clear + install + verify) tampoco lo resolvió. Ejecuta MANUALMENTE en el frontend, con el Node configurado en el PATH" +
+      (nodePath ? ` (${nodePath})` : "") +
+      ":",
+    "  npx cypress cache clear",
+    "  npx cypress install",
+    "  npx cypress verify",
+    "Si la descarga falla por proxy, comprueba NO_PROXY y la conectividad a download.cypress.io. Tras reparar, vuelve a llamar a runE2ETests.",
+  ].join("\n");
 }
 
 function openApiSnippet(content: string): string {
@@ -1164,7 +1219,7 @@ export async function generateE2ETests(
       attempts = attempt;
       await clearBaselineForRf(frontendRoot, entry.id);
 
-      const run = await runCypressSpec({
+      const run = await runCypressSpecWithRepair({
         frontendRoot,
         specRelPath,
         runCommand,
@@ -1175,6 +1230,11 @@ export async function generateE2ETests(
 
       if (run.passed) {
         passed = true;
+        break;
+      }
+
+      if (run.cacheError) {
+        lastOutput = `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${run.output}`;
         break;
       }
 
@@ -1503,6 +1563,8 @@ export interface E2ERunFixResult {
   output?: string;
   /** Prompt de corrección listo para el agente (si falló). */
   fixPrompt?: string;
+  /** true si el fallo es por caché V8 corrupta de Cypress (error de ENTORNO). */
+  cacheError?: boolean;
 }
 
 export interface E2ERunFallbackResult {
@@ -1627,7 +1689,7 @@ export async function runE2EFallback(
     }
 
     await clearBaselineForRf(frontendRoot, entry.id);
-    const run = await runCypressSpec({
+    const run = await runCypressSpecWithRepair({
       frontendRoot,
       specRelPath,
       runCommand,
@@ -1649,6 +1711,21 @@ export async function runE2EFallback(
     }
 
     await setRfGreen(outputRoot, entry.id, false);
+
+    if (run.cacheError) {
+      results.push({
+        rf: entry.id,
+        name: entry.name,
+        filePath: fullPath,
+        specRelPath,
+        passed: false,
+        missing: false,
+        cacheError: true,
+        output: `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${extractCypressFailureSummary(run.output, 2000)}`,
+      });
+      continue;
+    }
+
     const result: E2ERunFixResult = {
       rf: entry.id,
       name: entry.name,

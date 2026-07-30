@@ -120,6 +120,11 @@ Y elimina `qa-mcp` de la configuración global (**MCP: Open User Configuration**
    - Para fijar la URL de ejecución E2E, añade `e2eBaseUrl` (ej. `https://mi-entorno.aena.es`).
    - Para ejecutar Cypress con un Node concreto (p. ej. instalación nvm), añade `e2eNodePath` con el directorio que contiene `node.exe`/`npx` (por defecto `C:\Users\aena\AppData\Roaming\nvm\v24.16.0`); se antepone al `PATH` de la ejecución de Cypress.
    - Para pasar variables de entorno a la ejecución de Cypress (proxy, etc.), añade `e2eEnv` como objeto clave/valor. Por defecto se establece `NO_PROXY=localhost,127.0.0.1,.aena.es`; puedes sobreescribirlo o añadir más variables. Ej.: `"e2eEnv": { "NO_PROXY": "localhost,127.0.0.1,.aena.es", "HTTP_PROXY": "" }`.
+
+   > **⚠️ Timeout MCP en Roo/Cline (`MCP error -32001: Request timed out`):** una corrida real de Cypress (arranque + navegador + tests) supera con facilidad el **timeout por defecto de 60 s** de las llamadas MCP. Sube el `timeout` del servidor `qa-mcp` en la config MCP del cliente (Roo permite hasta 3600 s; recomendado **600**). Es imprescindible además si la tool tiene que **reparar la caché de Cypress** (descarga del binario, ver abajo).
+
+   > **⚠️ `Invalid or incompatible cached data (cachedDataRejected)` al lanzar Cypress:** es un **error de ENTORNO** (caché V8 del binario de Cypress corrupta/incompatible con la versión de Node), **no** del spec. `runE2ETests`/`generateE2ETests` lo **detectan y reparan automáticamente una vez** (`cypress cache clear` + `install` + `verify`) y reintentan; si persiste, devuelven un aviso claro (NO reescriben el test). Repara manualmente en el frontend, con el Node configurado en el PATH: `npx cypress cache clear && npx cypress install && npx cypress verify`. La reparación descarga el binario: asegura conectividad a `download.cypress.io` (revisa `NO_PROXY`) y **sube el timeout MCP** (arriba).
+
 2. En VS Code Copilot, configura y arranca el servidor MCP `qa-mcp` con `cwd` apuntando a ese proyecto.
 3. En Copilot Chat (modo Agent), ejecuta las tools según necesidad:
    - `autoCompleteRfCu`: completa `rf-cu.md`. Infiere RF desde OpenAPI + `appRouting` y estima los CU con el LLM del cliente (MCP sampling) analizando el frontend.
