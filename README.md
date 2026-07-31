@@ -26,31 +26,38 @@ Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP s
 
 **Contexto limpio por RF:** todo el estado vive en **disco** (los `.cy.js` + `.qa-mcp-e2e-status.json` con los RF en verde), no en la conversación del cliente. Por eso el bucle es **reanudable desde una tarea nueva**: cuando el contexto del cliente empiece a llenarse (p. ej. al llegar a RF-10/RF-11), **inicia una tarea nueva** y vuelve a llamar a `generateE2ETests`; el servidor detecta el siguiente RF pendiente automáticamente y continúa desde ahí con contexto limpio. Cada llamada emite solo el RF en curso (frontend como lista de rutas, no código embebido) para minimizar el footprint.
 
-**Automatizar el contexto limpio con subtasks (Roo Code / Orchestrator):** en clientes con orquestación de subtasks (Boomerang / Orchestrator, p. ej. **Roo Code**), no hace falta iniciar la tarea nueva a mano. Cada respuesta de `generateE2ETests` / `runE2ETests` incluye una **`SEÑAL DE SUBTASK`** con un campo `QUEDA_TRABAJO` (sí/no) y la instrucción de si seguir en el mismo subtask o delegar el siguiente RF en un `new_task` con contexto limpio. Como todo el estado está en disco, cada subtask arranca limpio y el servidor resuelve solo el RF pendiente.
+**Automatizar el contexto limpio con subtasks (Roo Code / Orchestrator):** en clientes con orquestación de subtasks (Boomerang / Orchestrator, p. ej. **Roo Code**), no hace falta iniciar la tarea nueva a mano. Cada respuesta de `generateE2ETests` / `runE2ETests` incluye una **`SEÑAL DE SUBTASK`** con un campo `QUEDA_TRABAJO` (sí/no) y la instrucción de si seguir en el mismo subtask o delegar el siguiente paso en un `new_task` con contexto limpio. Como todo el estado está en disco, cada subtask arranca limpio y el servidor resuelve solo el RF pendiente.
+
+> **Higiene de contexto en el bucle de corrección:** el contexto no solo se llena al avanzar entre RF, sino sobre todo al **iterar correcciones dentro de un mismo RF** (cada vuelta reinyecta spec + salida de Cypress + reglas, y el agente reescribe el fichero entero). Por eso, cuando un RF **falla**, la señal pasa a modo **reintento con contexto limpio**: haz **UNA** corrección por subtask y ciérralo; el **siguiente intento del mismo RF** lo hace un `new_task` NUEVO (el `.cy.js` queda en disco y el servidor reengancha el RF pendiente). Así cada subtask ejecuta ~1 corrida de Cypress + 1 reescritura y el contexto no crece.
 
 > **IMPORTANTE — modos de Roo y acceso MCP:** el modo **Orchestrator NO tiene acceso directo a tools MCP** (solo delega vía `new_task`); si le pides que llame a `autoCompleteRfCu`/`generateE2ETests` directamente, responderá que *"no es una tool reconocida"*. La llamada a la tool debe ocurrir **dentro del subtask**, en un modo con el grupo `mcp` **y** `edit`. Usa **modo Code** (`mode: "code"`) para los subtasks: como Roo no soporta sampling, las tools corren en modo asistido y el agente debe **escribir** los ficheros (`rf-cu.md`, `.cy.js`), así que hace falta editar. (Architect solo edita markdown; Ask no edita.)
 
 Prompt listo para pegar en la **tarea padre** (Roo en modo Orchestrator):
 
 ```
-Eres el orquestador del bucle E2E de qa-mcp. Objetivo: dejar TODOS los RF en verde,
-un RF por subtask, para no llenar el contexto.
+Eres el orquestador del bucle E2E de qa-mcp. Objetivo: dejar TODOS los RF en verde
+SIN llenar el contexto: cada subtask hace UNA unidad de trabajo (generar, o UNA
+corrección) y se cierra; el estado vive en disco y el servidor reengancha el RF
+pendiente en cada subtask.
 
 Repite este ciclo:
 1. Crea un new_task EN MODO CODE (mode: "code") con contexto limpio y este objetivo
    (el modo Code es obligatorio: tiene acceso a las tools MCP y puede escribir ficheros;
    tú, como Orchestrator, NO puedes llamar a las tools qa-mcp directamente):
-   "Continúa el bucle E2E del siguiente RF pendiente de qa-mcp: llama a la tool
-    generateE2ETests, escribe el .cy.js en la ruta EXACTA que indique, llama a
-    runE2ETests e itera (reescribe + runE2ETests) hasta que ESE RF pase. El RF
-    pendiente y el estado se resuelven solos desde disco. Cuando el RF esté en
-    verde, termina con attempt_completion. Si la tool responde que TODOS los RF
-    están en verde, indícalo y no hagas nada más."
-2. Cuando el subtask termine, lee su resultado.
-3. Si el resultado indica que quedan RF (QUEDA_TRABAJO: sí), vuelve al paso 1.
-4. Si indica que TODOS los RF están en verde (QUEDA_TRABAJO: no), termina.
+   "Avanza el bucle E2E de qa-mcp para el RF pendiente (se resuelve solo desde disco):
+    - Si no tiene spec: llama a generateE2ETests, escribe el .cy.js en la ruta EXACTA
+      indicada y llama a runE2ETests UNA vez.
+    - Si ya tiene spec: llama a runE2ETests UNA vez.
+    Si PASA, termina con attempt_completion indicando 'RF en verde'. Si FALLA, aplica
+    UNA sola corrección (reescribe el .cy.js con el PROMPT DE CORRECCIÓN) y termina con
+    attempt_completion SIN volver a llamar a runE2ETests. Copia en tu resumen la línea
+    QUEDA_TRABAJO de la SEÑAL DE SUBTASK."
+2. Cuando el subtask termine, lee su resultado (la línea QUEDA_TRABAJO).
+3. Si QUEDA_TRABAJO: sí (siguiente RF o reintento del RF en curso), vuelve al paso 1.
+4. Si QUEDA_TRABAJO: no (TODOS los RF en verde), termina.
 
-No generes ni ejecutes tests tú mismo: delega SIEMPRE cada RF en un subtask en modo Code.
+No generes ni ejecutes tests tú mismo: delega SIEMPRE cada unidad de trabajo en un
+subtask en modo Code con contexto limpio.
 ```
 
 En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `generateE2ETests` ya genera, ejecuta e itera RF a RF por sí misma.
@@ -120,6 +127,7 @@ Y elimina `qa-mcp` de la configuración global (**MCP: Open User Configuration**
    - Para fijar la URL de ejecución E2E, añade `e2eBaseUrl` (ej. `https://mi-entorno.aena.es`).
    - Para ejecutar Cypress con un Node concreto (p. ej. instalación nvm), añade `e2eNodePath` con el directorio que contiene `node.exe`/`npx` (por defecto `C:\Users\aena\AppData\Roaming\nvm\v24.16.0`); se antepone al `PATH` de la ejecución de Cypress.
    - Para pasar variables de entorno a la ejecución de Cypress (proxy, etc.), añade `e2eEnv` como objeto clave/valor. Por defecto se establece `NO_PROXY=localhost,127.0.0.1,.aena.es`; puedes sobreescribirlo o añadir más variables. Ej.: `"e2eEnv": { "NO_PROXY": "localhost,127.0.0.1,.aena.es", "HTTP_PROXY": "" }`.
+   - Para **ver el navegador mientras Cypress ejecuta** (modo headed), añade `"e2eHeaded": true`: el runner del MCP añade `--headed`, así que ves cada spec en un navegador visible (se cierra al terminar; NO se usa `--no-exit` para no colgar la llamada MCP). Opcionalmente `"e2eBrowser": "chrome"` (o `edge`/`firefox`/`electron`) para elegir navegador — debe estar instalado; por defecto Electron.
 
    > **⚠️ Timeout MCP en Roo/Cline (`MCP error -32001: Request timed out`):** una corrida real de Cypress (arranque + navegador + tests) supera con facilidad el **timeout por defecto de 60 s** de las llamadas MCP. Sube el `timeout` del servidor `qa-mcp` en la config MCP del cliente (Roo permite hasta 3600 s; recomendado **600**). Es imprescindible además si la tool tiene que **reparar la caché de Cypress** (descarga del binario, ver abajo).
 

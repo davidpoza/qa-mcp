@@ -26,6 +26,8 @@ const DEFAULT_E2E_NODE_PATH = "C:\\Users\\aena\\AppData\\Roaming\\nvm\\v24.16.0"
 function resolveE2ERuntime(context: LoadedContext): {
   nodePath: string | undefined;
   env: Record<string, string>;
+  headed: boolean;
+  browser: string | undefined;
 } {
   const nodePath = context.config.e2eNodePath ?? DEFAULT_E2E_NODE_PATH;
   const env: Record<string, string> = {
@@ -33,7 +35,12 @@ function resolveE2ERuntime(context: LoadedContext): {
     no_proxy: DEFAULT_E2E_NO_PROXY,
     ...(context.config.e2eEnv ?? {}),
   };
-  return { nodePath, env };
+  return {
+    nodePath,
+    env,
+    headed: context.config.e2eHeaded ?? false,
+    browser: context.config.e2eBrowser,
+  };
 }
 
 /**
@@ -49,6 +56,8 @@ async function runCypressSpecWithRepair(params: {
   timeoutMs?: number;
   nodePath?: string;
   env?: Record<string, string>;
+  headed?: boolean;
+  browser?: string;
 }): Promise<CypressRunResult & { cacheError?: boolean }> {
   const first = await runCypressSpec(params);
   if (first.passed || !isCypressCacheError(first.output)) {
@@ -1571,6 +1580,12 @@ export interface E2ERunFallbackResult {
   results: E2ERunFixResult[];
   runCommand: string;
   frontendRoot: string;
+  /** Ruta del mcp.config.json que el servidor cargó (para diagnóstico). */
+  configPath?: string;
+  /** true si Cypress se ejecutará con navegador visible (`--headed`). */
+  headed?: boolean;
+  /** Navegador configurado para la ejecución (`--browser`). */
+  browser?: string;
   /** Nº total de RF en el ámbito (tras aplicar rfFilter). */
   totalCount?: number;
   /** Nº de RF en verde (según estado en disco) tras esta ejecución. */
@@ -1639,6 +1654,12 @@ export async function runE2EFallback(
   const scopeCount = entries.length;
   const status = await readE2EStatus(outputRoot);
   const priorGreen = entries.filter((e) => isRfGreen(status, e.id)).length;
+  const rt = resolveE2ERuntime(context);
+  const diag = {
+    configPath: context.configPath,
+    headed: rt.headed,
+    browser: rt.browser,
+  };
 
   // Modo RF-a-RF-hasta-verde: ejecuta SOLO el RF en curso (el primero no verde,
   // o el indicado por rfFilter), para acotar la salida y el contexto del cliente.
@@ -1649,6 +1670,7 @@ export async function runE2EFallback(
         results: [],
         runCommand,
         frontendRoot,
+        ...diag,
         totalCount: scopeCount,
         greenCount: priorGreen,
         allGreen: true,
@@ -1757,7 +1779,7 @@ export async function runE2EFallback(
         frontendIsFileList: leanFrontend,
         fix: {
           currentSpec: failure.currentSpec,
-          cypressOutput: extractCypressFailureSummary(failure.rawOutput),
+          cypressOutput: extractCypressFailureSummary(failure.rawOutput, 4000),
           attempt: 1,
         },
       });
@@ -1785,6 +1807,7 @@ export async function runE2EFallback(
       results,
       runCommand,
       frontendRoot,
+      ...diag,
       totalCount: scopeCount,
       greenCount,
       allGreen: greenCount >= scopeCount,
@@ -1792,6 +1815,6 @@ export async function runE2EFallback(
     };
   }
 
-  return { results, runCommand, frontendRoot };
+  return { results, runCommand, frontendRoot, ...diag };
 }
 

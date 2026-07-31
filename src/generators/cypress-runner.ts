@@ -31,11 +31,17 @@ export async function runCypressSpec(params: {
   nodePath?: string;
   /** Variables de entorno adicionales (p. ej. NO_PROXY) para la ejecución. */
   env?: Record<string, string>;
+  /** Si es true, ejecuta con navegador visible (`--headed`). */
+  headed?: boolean;
+  /** Navegador para `--browser` (chrome, edge, electron, firefox). */
+  browser?: string;
 }): Promise<CypressRunResult> {
   const { frontendRoot, specRelPath, nodePath } = params;
   const runCommand = params.runCommand ?? "npx cypress run";
   const timeoutMs = params.timeoutMs ?? 300000;
-  const fullCommand = `${runCommand} --spec "${specRelPath}" --reporter spec`;
+  const headedFlag = params.headed ? " --headed" : "";
+  const browserFlag = params.browser ? ` --browser ${params.browser}` : "";
+  const fullCommand = `${runCommand} --spec "${specRelPath}"${headedFlag}${browserFlag} --reporter spec`;
 
   const extraEnv = params.env ?? {};
   const pathSeparator = process.platform === "win32" ? ";" : ":";
@@ -43,7 +49,7 @@ export async function runCypressSpec(params: {
   const mergedPath = nodePath ? `${nodePath}${pathSeparator}${basePath}` : basePath;
 
   return new Promise<CypressRunResult>((resolve) => {
-    let output = "";
+    let output = `[qa-mcp] Ejecutando Cypress: ${fullCommand}\n[qa-mcp] cwd: ${frontendRoot}${nodePath ? `\n[qa-mcp] node: ${nodePath}` : ""}\n`;
     let settled = false;
 
     const finish = (result: CypressRunResult) => {

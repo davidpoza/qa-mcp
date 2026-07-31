@@ -29,6 +29,10 @@ export interface McpQaConfig {
   e2eRunCommand?: string;
   e2eNodePath?: string;
   e2eEnv?: Record<string, string>;
+  /** Si es true, ejecuta Cypress con navegador visible (`--headed`). */
+  e2eHeaded?: boolean;
+  /** Navegador para `--browser` (chrome, edge, electron, firefox). */
+  e2eBrowser?: string;
   openApi: string;
   appRouting?: string;
   requirements?: string;

@@ -97,7 +97,7 @@ function clientSupportsSampling(): boolean {
  * porque ya no queda trabajo ("done"). En clientes sin subtasks es solo texto
  * informativo e inocuo.
  */
-function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
+function buildSubtaskSignal(mode: "advance" | "continue" | "retry" | "done"): string {
   const header =
     "--- SEÑAL DE SUBTASK (clientes con Orchestrator/Boomerang, p. ej. Roo Code) ---";
   const footer = "--- FIN SEÑAL DE SUBTASK ---";
@@ -114,6 +114,13 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
     "empiezas con contexto limpio. Cuando el RF esté en verde, termina con " +
     "attempt_completion. Si la tool responde que TODOS los RF están en verde, NO crees " +
     "más subtasks e informa de que el ciclo ha terminado.\"";
+  const retryDelegatePrompt =
+    "\"Continúa corrigiendo el RF E2E EN CURSO de qa-mcp (el primero no verde; se " +
+    "resuelve solo desde disco). Llama a runE2ETests: si PASA, termina con " +
+    "attempt_completion; si FALLA, aplica UNA sola corrección (reescribe el .cy.js en la " +
+    "ruta indicada con el PROMPT DE CORRECCIÓN) y termina con attempt_completion SIN volver " +
+    "a llamar a runE2ETests. El spec queda en disco; el siguiente intento lo hará otro " +
+    "subtask con contexto limpio.\"";
 
   if (mode === "done") {
     return [
@@ -129,6 +136,17 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
       "QUEDA_TRABAJO: sí (siguiente RF)",
       "El RF en curso YA está en verde. En modo Orchestrator: cierra ESTE subtask con attempt_completion y delega el SIGUIENTE RF en un new_task NUEVO (contexto limpio) con este objetivo:",
       delegatePrompt,
+      modeHint,
+      footer,
+    ].join("\n");
+  }
+  if (mode === "retry") {
+    return [
+      header,
+      "QUEDA_TRABAJO: sí (RF en curso, aún ROJO — reintento con CONTEXTO LIMPIO)",
+      "HIGIENE DE CONTEXTO: para NO llenar el contexto, aplica en ESTE subtask UNA sola corrección (reescribe el .cy.js con el PROMPT DE CORRECCIÓN) y CIÉRRALO con attempt_completion. NO vuelvas a llamar a runE2ETests aquí.",
+      "El PADRE debe delegar el SIGUIENTE intento (mismo RF pendiente) en un new_task NUEVO (contexto limpio) con este objetivo:",
+      retryDelegatePrompt,
       modeHint,
       footer,
     ].join("\n");
@@ -222,33 +240,38 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
   const cleanContextTip =
     "CONTEXTO LIMPIO: el progreso está en disco. Para el siguiente RF, INICIA UNA TAREA NUEVA " +
     "y llama a `generateE2ETests`; el servidor continúa por el RF pendiente.";
+  const diagLine =
+    `[qa-mcp] Config cargada: ${run.configPath ?? "(desconocida)"} | ` +
+    `headed: ${run.headed ? "sí (--headed)" : "no"}` +
+    `${run.browser ? ` | browser: ${run.browser}` : ""}`;
+  const withDiag = (lines: string[]): string => [diagLine, "", ...lines].join("\n");
   const single = run.results[0];
   const green = run.greenCount ?? 0;
   const total = run.totalCount ?? run.results.length;
 
   if (run.nextAction === "done") {
-    return [
+    return withDiag([
       "✅ TODOS los RF del ámbito están en VERDE.",
       `RF en verde: ${green}/${total}.`,
       `Directorio de trabajo: ${run.frontendRoot}`,
       "",
       buildSubtaskSignal("done"),
-    ].join("\n");
+    ]);
   }
 
   if (run.nextAction === "generate" || single?.missing) {
-    return [
+    return withDiag([
       `El RF en curso (${single?.rf ?? "?"} — ${single?.name ?? ""}) aún no tiene spec.`,
       `Progreso: ${green}/${total} RF en verde.`,
       "Llama a `generateE2ETests` para obtener su prompt de generación, escribe el `.cy.js` y vuelve a `runE2ETests`.",
       single ? `Ruta esperada del spec: ${single.filePath}` : "",
       "",
       buildSubtaskSignal("continue"),
-    ].filter(Boolean).join("\n");
+    ].filter(Boolean));
   }
 
   if (run.nextAction === "next" || single?.passed) {
-    return [
+    return withDiag([
       `✅ ${single?.rf} — ${single?.name}: PASA. Marcado en verde.`,
       `Progreso: ${green}/${total} RF en verde.`,
       "",
@@ -257,18 +280,29 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
       `Directorio de trabajo: ${run.frontendRoot}`,
       "",
       buildSubtaskSignal("advance"),
-    ].join("\n");
+    ]);
   }
 
   // nextAction === "fix"
-  return [
+  if (single?.cacheError) {
+    return withDiag([
+      `⚠️ ${single?.rf} — ${single?.name}: Cypress NO arrancó por un error de ENTORNO (caché V8), no del spec.`,
+      `Progreso: ${green}/${total} RF en verde.`,
+      "",
+      "NO reescribas el spec: no soluciona nada. Repara la caché de Cypress y reintenta.",
+      single?.output ?? "(sin salida)",
+      "",
+      buildSubtaskSignal("continue"),
+    ]);
+  }
+  return withDiag([
     `❌ ${single?.rf} — ${single?.name}: FALLA.`,
     `Progreso: ${green}/${total} RF en verde. Este RF NO avanza hasta que pase.`,
     "",
-    "QUÉ HACER AHORA:",
+    "QUÉ HACER AHORA (UN solo intento por subtask, para no llenar el contexto):",
     "1) Diagnostica con la salida de Cypress de abajo y aplica el PROMPT DE CORRECCIÓN.",
-    "2) Reescribe el spec en su ruta (JavaScript PLANO, sin TypeScript).",
-    "3) Vuelve a llamar a `runE2ETests` (mismo RF) hasta que pase. NO toques tsconfig ni errores de tipos.",
+    "2) Reescribe el spec en su ruta (JavaScript PLANO, sin TypeScript). NO toques tsconfig ni errores de tipos.",
+    "3) En un cliente con subtasks (Roo Orchestrator): NO vuelvas a llamar a `runE2ETests` en este subtask; ciérralo y deja que el siguiente intento lo haga un subtask NUEVO con contexto limpio (ver SEÑAL DE SUBTASK). En un cliente SIN subtasks: vuelve a llamar a `runE2ETests` (mismo RF) hasta que pase.",
     "",
     `===== ${single?.rf} — ${single?.name} =====`,
     `Ruta del spec (reescribe aquí): ${single?.filePath}`,
@@ -278,8 +312,8 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     single?.fixPrompt ?? "(no disponible)",
     "--- FIN PROMPT ---",
     "",
-    buildSubtaskSignal("continue"),
-  ].join("\n");
+    buildSubtaskSignal("retry"),
+  ]);
 }
 
 registerToolCompat(
