@@ -156,6 +156,11 @@ function helperApiSummary(): string {
     "- `setInputValue(inputSelector, value)`: rellena un input disparando eventos Angular (input/change).",
     "- `setNumericFieldValue(fieldSelector, value)`: igual para campos numéricos (usa `input:not([type=hidden])`).",
     "- `setValueByFormControl(componentSelector, formControlName, value)`: rellena `[formcontrolname=...] input`.",
+    "- `assertControlEnabled(rootSelector)`: afirma que un control (nativo O custom `empresas-ui-*`) está HABILITADO. Resuelve el `<input>/<select>/<button>` nativo interno; si es un web component sin nativo interno, comprueba ausencia de `disabled`/`aria-disabled`/clase `disabled`. RECIBE UN SELECTOR STRING (nunca un subject/chainable). ÚSALO SIEMPRE en lugar de `.should('be.enabled')` sobre un wrapper custom (el pseudo `:enabled` NO matchea web components y CUELGA).",
+    "- `assertControlDisabled(rootSelector)`: idéntico pero afirma DESHABILITADO. RECIBE UN SELECTOR STRING. ÚSALO en vez de `.should('be.disabled')` sobre wrappers custom.",
+    "- `getNativeControl(rootSelector)`: devuelve (vía cy.then) el elemento nativo (`input/select/textarea/button`) interno de un control custom, o el propio elemento si ya es nativo. Úsalo para aserciones `have.value`/`have.attr('placeholder')`/`be.enabled` sobre controles `empresas-ui-*`.",
+    "- `assertUiButtonDisabled(labelOrText)` / `assertUiButtonEnabled(labelOrText)`: localizan un `empresas-ui-button`/`button` por su `label` (ATRIBUTO **o** PROPIEDAD Angular `[label]`), `aria-label` o TEXTO visible, y afirman deshabilitado/habilitado ELLOS MISMOS. RECIBEN UNA CADENA (label/texto), NO un subject. ÚSALOS DIRECTAMENTE para el estado de un botón: `assertUiButtonDisabled('simulador.btn_descarga_sim')`. **PROHIBIDO** envolver: nunca hagas `assertControlDisabled(findUiButtonByLabel(...))` (assertControlDisabled espera un SELECTOR STRING, no un chainable). `cy.get('empresas-ui-button[label=\"x\"]')` NO funciona si `label` es un binding `[label]=\"...\"` (propiedad, no atributo reflejado) → 'never found it'.",
+    "- `findUiButtonByLabel(labelOrText)`: como los anteriores pero devuelve el subject del botón SOLO para CLICAR (`findUiButtonByLabel('x').click()`). Para AFIRMAR estado usa `assertUiButtonDisabled`/`assertUiButtonEnabled`, no lo pases a otro helper.",
     "- `dismissKnownOverlays(extraSelectors?)`: cierra cookies/overlays comunes.",
     "- `openAccordionByComponent(componentSelector)`: abre el acordeón/tarjeta que contiene un componente.",
   ].join("\n");
@@ -506,6 +511,17 @@ function buildE2EGenerationPrompt(params: {
     "   - Para LEER opciones en escenarios NOMINALES (afirmar que HAY opciones) usa `waitForSelectableOptions('#sociedad').then((opts) => { ... })`, que ESPERA a que se rellenen (son asíncronas). NO uses `getSelectOptions` para eso: leería 0 antes de que Angular renderice las `<option>`.",
     "   - Para LEER opciones en escenarios VACÍOS/negativos usa `getSelectOptions('#sociedad').then((opts) => { ... })`. NUNCA uses `cy.get('#sociedad').find('option')` porque `.find` reintenta hasta que exista una opción y COLGARÁ el test en escenarios vacíos.",
     "   - Para inputs custom usa `setInputValue`/`setNumericFieldValue`/`setValueByFormControl` (resuelven el `<input>` interno).",
+    "   - **ASERCIONES enabled/disabled SOBRE CONTROLES CUSTOM (CAUSA FRECUENTE DE FALLO)**: NUNCA hagas `.should('be.enabled')`/`.should('be.disabled')` directamente sobre un wrapper `empresas-ui-*` (`#pesoAeronave`, `empresas-ui-button`, ...). El pseudo-selector jQuery `:enabled`/`:disabled` SOLO matchea controles nativos (`input/select/textarea/button`), así que sobre un web component NUNCA matchea y el test AGOTA el timeout (`expected '<empresas-ui-input#pesoAeronave...>' to be 'enabled'`). Usa SIEMPRE `assertControlEnabled('#pesoAeronave')` / `assertControlDisabled('#selector')` (resuelven el nativo interno o comprueban `disabled`/`aria-disabled`/clase). Para `have.value`/`have.attr('placeholder')` sobre un control custom, usa `getNativeControl('#id').should('have.attr','placeholder', ...)`, no el wrapper.",
+    "   - **NO ASUMAS QUE UN BOTÓN DE ACCIÓN SE DESHABILITA POR UNA VALIDACIÓN/SELECCIÓN INCOMPLETA (CAUSA FRECUENTE DE FALLO)**: en un CU de validación negativa NO stubeado (p. ej. \"seleccionar sociedad pero NO aeropuerto → el botón Descargar está deshabilitado\"), NO des por hecho que el botón queda `disabled`. Muchos botones permanecen HABILITADOS y la validación se manifiesta de OTRA forma (mensaje de error, atributo `viewValidation`/`ng-invalid`/clase de error en el campo, o error al pulsar). Antes de afirmar `assertUiButtonDisabled(...)`: (1) LOCALIZA en la plantilla el binding `[disabled]=\"...\"` (o `[isDisabled]`) del botón y comprueba de qué depende REALMENTE; si NO depende del control que dejaste incompleto (o no existe tal binding), NO afirmes `disabled` (fallarías con `expected false to equal true`). (2) En su lugar, afirma el INDICADOR DE ERROR real que el código renderiza para ese campo (p. ej. `cy.get('#selectAirport').should('have.attr','viewValidation')` / clase de error / mensaje literal presente en el HTML). (3) Mantén la INTENCIÓN del CU (verificar el escenario inválido) pero adáptala al comportamiento REAL observable del código, sin inventar `disabled` ni mensajes que no existan. Regla equivalente para HABILITAR: no asumas que un botón se habilita solo por rellenar un campo si el `[disabled]` depende de más condiciones.",
+    "   - **SELECTOR DE UN SOLO ELEMENTO ANTES DE `have.attr`/`be.disabled` (CAUSA FRECUENTE DE FALLO)**: si un tag de componente se repite (p. ej. hay 7 `empresas-ui-button`), `cy.get('empresas-ui-button').should('have.attr','label', X)` FALLA (`expected '[ <empresas-ui-button.filtro>, 6 more... ]' to have attribute 'label'`) porque asevera sobre el conjunto. ACOTA a un único elemento: para botones usa `assertUiButtonDisabled('<label>')`/`assertUiButtonEnabled('<label>')`/`findUiButtonByLabel('<label>')` (matchean por atributo O propiedad O texto); para otros, un `id`/`class`/`data-*` literal o `.contains(...)`. NUNCA aseveres un atributo sobre un match múltiple.",
+    "   - **BINDINGS DE PROPIEDAD ANGULAR NO SON ATRIBUTOS (CAUSA FRECUENTE DE FALLO)**: en las plantillas, `[label]=\"...\"`, `[placeholder]=\"...\"`, `[title]=\"...\"` fijan una PROPIEDAD JS del elemento, que a menudo NO se refleja como atributo HTML. Por eso `cy.get('empresas-ui-button[label=\"...\"]')` puede NUNCA encontrar el botón (`Expected to find element ... but never found it`), aunque en el HTML veas `[label]=\"'...'\"`. Para localizar botones usa `assertUiButtonDisabled('<labelKey o texto>')` / `assertUiButtonEnabled(...)` / `findUiButtonByLabel(...)` (matchean por atributo O propiedad O texto). Para otros controles, filtra por propiedad: `cy.get('tag').filter((i,el)=> el.<prop> === '<valor>').first()`, o usa un `id`/`class`/`data-*`/atributo SIN corchetes presente literal en la plantilla.",
+    "   - **TEXTOS i18n: LA PLANTILLA TIENE CLAVES, EL RUNTIME MUESTRA TRADUCCIONES (CAUSA FRECUENTE DE FALLO)**: en el HTML, `placeholder`, `label`, textos de botón, etc. suelen ser CLAVES i18n (p. ej. `simulador.filtros.peso.placeholder`) que en EJECUCIÓN se renderizan TRADUCIDAS (p. ej. `'Por favor indique el peso de la aeronave'`). NUNCA afirmes que un `placeholder`/`label`/texto es IGUAL a la clave que leíste en la plantilla (`expected -'Por favor...' +'simulador.filtros.peso.placeholder'`). En su lugar: (1) para el campo, comprueba EXISTENCIA/estado (`assertControlEnabled('#id')`, `getNativeControl('#id').should('have.attr','placeholder')` SIN valor exacto, o `.should('not.have.value','')`); (2) si quieres registrar el texto, MÉTELO EN EL SNAPSHOT del baseline (valor real leído del DOM), no lo hardcodees; (3) si debes comparar contra un literal, usa el TEXTO TRADUCIDO real o una coincidencia parcial insensible a mayúsculas, nunca la clave.",
+    "   - **NO METAS CHAINABLES `cy.*` EN EL SNAPSHOT, Y NUNCA USES `Promise.all`/`async`/`await` SOBRE COMANDOS CYPRESS (CAUSA FRECUENTE DE FALLO)**: los comandos `cy.*` NO son promesas reales; envolverlos en `Promise.all([...])` o `await` lanza `CypressError: returned a promise from a command while also invoking cy commands`. Para leer varios valores del DOM y meterlos en el baseline, ACUMULA en un objeto plano a través de `.then` SECUENCIALES y construye el snapshot en un `cy.then` FINAL. Ejemplo CORRECTO:",
+    "         `const snap = { api: response.body, ui: {} };`",
+    "         `getNativeControl('#sociedad').then(($s) => { snap.ui.sociedad = $s.find('option:selected').text(); });`",
+    "         `getNativeControl('#selectAirport').then(($a) => { snap.ui.aeropuerto = $a.find('option:selected').text(); });`",
+    "         `cy.then(() => persistOrAssertBaseline('<RF>.<CU>', snap));`",
+    "       PROHIBIDO: `Promise.all([getNativeControl(...).then(...), ...]).then(([a,b]) => persistOrAssertBaseline(...))` y cualquier `async (…) => { const x = await cy.get(...) }`.",
     "   - **VALORES SINTÉTICOS DE ANGULAR (`[ngValue]`) — MUY IMPORTANTE**: los `<select>` de Angular que enlazan objetos con `[ngValue]=\"item\"` (muy habitual aquí) renderizan el atributo `value` de cada `<option>` como un token SINTÉTICO tipo `\"0: Object\"`, `\"1: Object\"`, que NO es el valor de negocio. En consecuencia: (1) NUNCA compares `$select.val()` ni `option.value` con un id/código de la API o con un parámetro de la URL (fallarías con `expected 'AASA' to equal '0: Object'`). (2) Para seleccionar una opción concreta hazlo por su TEXTO visible (`selectRequiredOptionByTextOrValue('#sociedad', '<texto visible>')`), NUNCA pasando `option.value`. (3) Para correlacionar una selección con la petición que dispara, extrae el identificador del **URL/body de la petición interceptada** (`cy.wait('@alias')`) y, si necesitas un valor esperado, tómalo de la **RESPUESTA de la API** (p. ej. la lista de organizaciones y sus ids/códigos), NUNCA del `value` del DOM. Trata `option.text` como el identificador fiable; `option.value` puede ser sintético.",
     "- **Contexto base**: identifica en la plantilla principal (simulador/pantalla principal) los filtros globales (p. ej. selects de sociedad/aeropuerto e inputs numéricos requeridos) y establécelos ANTES de interactuar con el componente concreto, si dicho componente los necesita para renderizarse o para que su llamada se dispare. Deriva esos selectores del código, no los inventes.",
     "- Identifica el componente/pantalla que consume este endpoint (correlaciona por operationId, campos de la respuesta y textos) y realiza el flujo real: fijar filtros globales necesarios, abrir el componente/acordeón (`openAccordionByComponent('app-...')`), rellenar campos requeridos y pulsar la acción que dispara la petición (normalmente un botón con texto \"Calcular importe\" u similar presente en el código).",
@@ -879,6 +895,106 @@ function buildE2EHelpersFile(): string {
     "  setInputValue(`${componentSelector} [formcontrolname='${formControlName}'] input`, value);",
     "}",
     "",
+    "function getNativeControl(rootSelector) {",
+    "  return cy.get(rootSelector, { timeout: 10000 }).first().then(($root) => {",
+    "    const native = $root.is('input, select, textarea, button')",
+    "      ? $root",
+    "      : $root.find('input, select, textarea, button').first();",
+    "    return cy.wrap(native && native.length ? native : $root);",
+    "  });",
+    "}",
+    "",
+    "function isElementDisabled($el) {",
+    "  const el = $el[0];",
+        "  if (!el) return false;",
+        "  // Si es un wrapper custom (p. ej. <empresas-ui-button>), el atributo `disabled`",
+        "  // AUTORITATIVO vive en el <button>/<input> nativo interno, NO en el wrapper",
+        "  // (que solo lleva `ng-reflect-disabled` en dev). Resolvemos el nativo interno.",
+        "  const nativeEl = $el.is('input, select, textarea, button')",
+        "    ? el",
+        "    : ($el.find('input, select, textarea, button')[0] || el);",
+        "  const $native = Cypress.$(nativeEl);",
+        "  return (",
+        "    nativeEl.hasAttribute('disabled') ||",
+        "    nativeEl.disabled === true ||",
+        "    $native.hasClass('disabled') ||",
+        "    $el.hasClass('disabled') ||",
+        "    String($native.attr('aria-disabled')).toLowerCase() === 'true' ||",
+        "    String($el.attr('aria-disabled')).toLowerCase() === 'true' ||",
+        "    String($el.attr('ng-reflect-disabled')).toLowerCase() === 'true'",
+        "  );",
+        "}",
+    "",
+    "function assertControlDisabled(rootSelector) {",
+    "  cy.get(rootSelector, { timeout: 10000 }).first().then(($root) => {",
+    "    const native = $root.is('input, select, textarea, button')",
+    "      ? $root",
+    "      : $root.find('input, select, textarea, button').first();",
+    "    if (native && native.length && native.is('input, select, textarea, button')) {",
+    "      cy.wrap(native).should('be.disabled');",
+    "    } else {",
+    "      cy.wrap($root).should(($el) => {",
+    "        expect(isElementDisabled($el), 'el control debe estar deshabilitado').to.eq(true);",
+    "      });",
+    "    }",
+    "  });",
+    "}",
+    "",
+    "function assertControlEnabled(rootSelector) {",
+    "  cy.get(rootSelector, { timeout: 10000 }).first().then(($root) => {",
+    "    const native = $root.is('input, select, textarea, button')",
+    "      ? $root",
+    "      : $root.find('input, select, textarea, button').first();",
+    "    if (native && native.length && native.is('input, select, textarea, button')) {",
+    "      cy.wrap(native).should('be.enabled');",
+    "    } else {",
+    "      cy.wrap($root).should(($el) => {",
+    "        expect(isElementDisabled($el), 'el control debe estar habilitado').to.eq(false);",
+    "      });",
+    "    }",
+    "  });",
+    "}",
+    "",
+    "function matchesButtonLabel(el, labelOrText) {",
+    "  const attr = el.getAttribute ? el.getAttribute('label') : null;",
+        "  const ngReflectLabel = el.getAttribute ? el.getAttribute('ng-reflect-label') : null;",
+        "  const prop = el.label;",
+        "  const aria = el.getAttribute ? el.getAttribute('aria-label') : null;",
+        "  const text = (el.textContent || '').trim();",
+        "  return (",
+        "    attr === labelOrText ||",
+        "    ngReflectLabel === labelOrText ||",
+        "    prop === labelOrText ||",
+        "    aria === labelOrText ||",
+        "    text === labelOrText ||",
+        "    (labelOrText && text.indexOf(labelOrText) >= 0)",
+        "  );",
+        "}",
+    "",
+    "// NOTA: la Cypress `.filter()` SOLO acepta un selector string (no un predicado",
+    "// como la de jQuery). Por eso filtramos con jQuery dentro de `.then`/`.should`.",
+    "function findUiButtonByLabel(labelOrText) {",
+    "  return cy",
+    "    .get('empresas-ui-button, button, [role=\"button\"]', { timeout: 10000 })",
+    "    .then(($els) => $els.filter((i, el) => matchesButtonLabel(el, labelOrText)).first());",
+    "}",
+    "",
+    "function assertUiButtonDisabled(labelOrText) {",
+    "  cy.get('empresas-ui-button, button, [role=\"button\"]', { timeout: 10000 }).should(($els) => {",
+    "    const match = $els.toArray().find((el) => matchesButtonLabel(el, labelOrText));",
+    "    expect(Boolean(match), `no se encontró botón con label/texto \"${labelOrText}\"`).to.eq(true);",
+    "    expect(isElementDisabled(Cypress.$(match)), `el botón \"${labelOrText}\" debe estar deshabilitado`).to.eq(true);",
+    "  });",
+    "}",
+    "",
+    "function assertUiButtonEnabled(labelOrText) {",
+    "  cy.get('empresas-ui-button, button, [role=\"button\"]', { timeout: 10000 }).should(($els) => {",
+    "    const match = $els.toArray().find((el) => matchesButtonLabel(el, labelOrText));",
+    "    expect(Boolean(match), `no se encontró botón con label/texto \"${labelOrText}\"`).to.eq(true);",
+    "    expect(isElementDisabled(Cypress.$(match)), `el botón \"${labelOrText}\" debe estar habilitado`).to.eq(false);",
+    "  });",
+    "}",
+    "",
     "function dismissKnownOverlays(extraSelectors = []) {",
     "  const knownButtons = [",
     "    '#onetrust-accept-btn-handler',",
@@ -951,6 +1067,12 @@ function buildE2EHelpersFile(): string {
     "  setInputValue,",
     "  setNumericFieldValue,",
     "  setValueByFormControl,",
+    "  getNativeControl,",
+    "  assertControlEnabled,",
+    "  assertControlDisabled,",
+    "  findUiButtonByLabel,",
+    "  assertUiButtonDisabled,",
+    "  assertUiButtonEnabled,",
     "  dismissKnownOverlays,",
     "  openAccordionByComponent,",
     "  persistOrAssertBaseline",
@@ -1239,15 +1361,44 @@ export async function generateE2ETests(
 
       if (run.passed) {
         passed = true;
+        await writeRfFeedbackLog({
+          outputRoot,
+          entry,
+          specFileName: fileName,
+          specPath: fullPath,
+          runCommand,
+          passed: true,
+          rawOutput: run.output,
+        });
         break;
       }
 
       if (run.cacheError) {
         lastOutput = `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${run.output}`;
+        await writeRfFeedbackLog({
+          outputRoot,
+          entry,
+          specFileName: fileName,
+          specPath: fullPath,
+          runCommand,
+          passed: false,
+          rawOutput: run.output,
+          injectedOutput: lastOutput,
+        });
         break;
       }
 
       if (attempt >= maxIterations) {
+        await writeRfFeedbackLog({
+          outputRoot,
+          entry,
+          specFileName: fileName,
+          specPath: fullPath,
+          runCommand,
+          passed: false,
+          rawOutput: run.output,
+          injectedOutput: extractCypressFailureSummary(run.output, 2000),
+        });
         break;
       }
 
@@ -1264,6 +1415,18 @@ export async function generateE2ETests(
           cypressOutput: extractCypressFailureSummary(run.output),
           attempt,
         },
+      });
+
+      await writeRfFeedbackLog({
+        outputRoot,
+        entry,
+        specFileName: fileName,
+        specPath: fullPath,
+        runCommand,
+        passed: false,
+        rawOutput: run.output,
+        injectedOutput: extractCypressFailureSummary(run.output, 2000),
+        fixPrompt,
       });
 
       const fixed = await sample(fixPrompt, 16000);
@@ -1574,6 +1737,8 @@ export interface E2ERunFixResult {
   fixPrompt?: string;
   /** true si el fallo es por caché V8 corrupta de Cypress (error de ENTORNO). */
   cacheError?: boolean;
+  /** Ruta del fichero .log con el feedback completo persistido (raw + prompt). */
+  logPath?: string;
 }
 
 export interface E2ERunFallbackResult {
@@ -1600,6 +1765,49 @@ export interface E2ERunFallbackResult {
    * - `done`: todos los RF del ámbito están en verde.
    */
   nextAction?: "fix" | "next" | "generate" | "done";
+}
+
+/**
+ * Persiste en disco el feedback COMPLETO que se inyecta al LLM para un RF, en un
+ * fichero `.log` por RF (mismo basename que el spec) que se SOBRESCRIBE en cada
+ * iteración de `runE2ETests`. Permite inspeccionar si el problema está en la
+ * salida de Cypress o en el prompt de corrección que recibe el modelo. Los fallos
+ * de escritura no interrumpen el bucle.
+ */
+async function writeRfFeedbackLog(params: {
+  outputRoot: string;
+  entry: RfEntry;
+  specFileName: string;
+  specPath: string;
+  runCommand?: string;
+  passed: boolean;
+  rawOutput: string;
+  injectedOutput?: string;
+  fixPrompt?: string;
+}): Promise<string | undefined> {
+  const logName = params.specFileName.replace(/\.cy\.js$/i, "") + ".log";
+  const logPath = path.join(params.outputRoot, logName);
+  const sep = (title: string) => `\n===== ${title} =====\n`;
+  const body = [
+    `[qa-mcp] Feedback E2E — ${params.entry.id} — ${params.entry.name}`,
+    `Generado: ${new Date().toISOString()}`,
+    `Spec: ${params.specPath}`,
+    `Comando Cypress: ${params.runCommand ?? "npx cypress run"}`,
+    `Resultado: ${params.passed ? "PASA (verde)" : "FALLA (rojo)"}`,
+    sep("SALIDA COMPLETA DE CYPRESS (raw, sin truncar)"),
+    params.rawOutput || "(sin salida)",
+    sep("RESUMEN INYECTADO AL LLM (output truncado)"),
+    params.injectedOutput ?? "(no aplica — el RF pasó o no se inyectó resumen)",
+    sep("PROMPT DE CORRECCIÓN INYECTADO AL LLM (fixPrompt)"),
+    params.fixPrompt ?? "(no aplica — el RF pasó o no se generó prompt de corrección)",
+  ].join("\n");
+  try {
+    await fs.mkdir(params.outputRoot, { recursive: true });
+    await fs.writeFile(logPath, body, "utf8");
+    return logPath;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1685,6 +1893,8 @@ export async function runE2EFallback(
     entry: RfEntry;
     currentSpec: string;
     rawOutput: string;
+    fileName: string;
+    fullPath: string;
   }
 
   const results: E2ERunFixResult[] = [];
@@ -1721,21 +1931,31 @@ export async function runE2EFallback(
 
     if (run.passed) {
       await setRfGreen(outputRoot, entry.id, true);
-      results.push({
+      const passResult: E2ERunFixResult = {
         rf: entry.id,
         name: entry.name,
         filePath: fullPath,
         specRelPath,
         passed: true,
         missing: false,
+      };
+      passResult.logPath = await writeRfFeedbackLog({
+        outputRoot,
+        entry,
+        specFileName: fileName,
+        specPath: fullPath,
+        runCommand,
+        passed: true,
+        rawOutput: run.output,
       });
+      results.push(passResult);
       continue;
     }
 
     await setRfGreen(outputRoot, entry.id, false);
 
     if (run.cacheError) {
-      results.push({
+      const cacheResult: E2ERunFixResult = {
         rf: entry.id,
         name: entry.name,
         filePath: fullPath,
@@ -1744,7 +1964,18 @@ export async function runE2EFallback(
         missing: false,
         cacheError: true,
         output: `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${extractCypressFailureSummary(run.output, 2000)}`,
+      };
+      cacheResult.logPath = await writeRfFeedbackLog({
+        outputRoot,
+        entry,
+        specFileName: fileName,
+        specPath: fullPath,
+        runCommand,
+        passed: false,
+        rawOutput: run.output,
+        injectedOutput: cacheResult.output,
       });
+      results.push(cacheResult);
       continue;
     }
 
@@ -1758,7 +1989,7 @@ export async function runE2EFallback(
       output: extractCypressFailureSummary(run.output, 2000),
     };
     results.push(result);
-    failures.push({ result, entry, currentSpec, rawOutput: run.output });
+    failures.push({ result, entry, currentSpec, rawOutput: run.output, fileName, fullPath });
   }
 
   const failuresToFix = oneFixAtATime ? failures.slice(0, 1) : failures;
@@ -1783,7 +2014,34 @@ export async function runE2EFallback(
           attempt: 1,
         },
       });
+      failure.result.logPath = await writeRfFeedbackLog({
+        outputRoot,
+        entry: failure.entry,
+        specFileName: failure.fileName,
+        specPath: failure.fullPath,
+        runCommand,
+        passed: false,
+        rawOutput: failure.rawOutput,
+        injectedOutput: failure.result.output,
+        fixPrompt: failure.result.fixPrompt,
+      });
     }
+  }
+
+  // Fallos que NO entran en failuresToFix (multi-RF con oneFixAtATime): persiste
+  // igualmente su log con la salida real, aunque sin prompt de corrección.
+  for (const failure of failures) {
+    if (failure.result.logPath) continue;
+    failure.result.logPath = await writeRfFeedbackLog({
+      outputRoot,
+      entry: failure.entry,
+      specFileName: failure.fileName,
+      specPath: failure.fullPath,
+      runCommand,
+      passed: false,
+      rawOutput: failure.rawOutput,
+      injectedOutput: failure.result.output,
+    });
   }
 
   if (untilGreen) {

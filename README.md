@@ -28,36 +28,37 @@ Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP s
 
 **Automatizar el contexto limpio con subtasks (Roo Code / Orchestrator):** en clientes con orquestación de subtasks (Boomerang / Orchestrator, p. ej. **Roo Code**), no hace falta iniciar la tarea nueva a mano. Cada respuesta de `generateE2ETests` / `runE2ETests` incluye una **`SEÑAL DE SUBTASK`** con un campo `QUEDA_TRABAJO` (sí/no) y la instrucción de si seguir en el mismo subtask o delegar el siguiente paso en un `new_task` con contexto limpio. Como todo el estado está en disco, cada subtask arranca limpio y el servidor resuelve solo el RF pendiente.
 
-> **Higiene de contexto en el bucle de corrección:** el contexto no solo se llena al avanzar entre RF, sino sobre todo al **iterar correcciones dentro de un mismo RF** (cada vuelta reinyecta spec + salida de Cypress + reglas, y el agente reescribe el fichero entero). Por eso, cuando un RF **falla**, la señal pasa a modo **reintento con contexto limpio**: haz **UNA** corrección por subtask y ciérralo; el **siguiente intento del mismo RF** lo hace un `new_task` NUEVO (el `.cy.js` queda en disco y el servidor reengancha el RF pendiente). Así cada subtask ejecuta ~1 corrida de Cypress + 1 reescritura y el contexto no crece.
+> **Higiene de contexto en el bucle de corrección:** el contexto se llena sobre todo al **iterar correcciones dentro de un mismo RF** (cada vuelta reinyecta spec + salida de Cypress + reglas, y el agente reescribe el fichero entero). Por eso se delega **un subtask por RF** (contexto limpio para cada RF), y **dentro** de ese subtask el agente itera corrección→`runE2ETests` hasta que ESE RF pase. Si aun así el contexto de un RF muy largo se llena, hay un **offload OPCIONAL**: cierra la tarea y deja que una tarea/subtask NUEVA reanude EL MISMO RF (el `.cy.js` y el estado quedan en disco; el servidor reengancha el primer RF no verde). El offload es un alivio puntual, **no** un fin del bucle: nunca cierres un RF en rojo dándolo por terminado.
 
 > **IMPORTANTE — modos de Roo y acceso MCP:** el modo **Orchestrator NO tiene acceso directo a tools MCP** (solo delega vía `new_task`); si le pides que llame a `autoCompleteRfCu`/`generateE2ETests` directamente, responderá que *"no es una tool reconocida"*. La llamada a la tool debe ocurrir **dentro del subtask**, en un modo con el grupo `mcp` **y** `edit`. Usa **modo Code** (`mode: "code"`) para los subtasks: como Roo no soporta sampling, las tools corren en modo asistido y el agente debe **escribir** los ficheros (`rf-cu.md`, `.cy.js`), así que hace falta editar. (Architect solo edita markdown; Ask no edita.)
 
 Prompt listo para pegar en la **tarea padre** (Roo en modo Orchestrator):
 
 ```
-Eres el orquestador del bucle E2E de qa-mcp. Objetivo: dejar TODOS los RF en verde
-SIN llenar el contexto: cada subtask hace UNA unidad de trabajo (generar, o UNA
-corrección) y se cierra; el estado vive en disco y el servidor reengancha el RF
-pendiente en cada subtask.
+Eres el orquestador del bucle E2E de qa-mcp. Objetivo: dejar TODOS los RF en verde.
+Delega UN subtask por RF (contexto limpio por RF); el estado vive en disco y el
+servidor reengancha el RF pendiente en cada subtask.
 
 Repite este ciclo:
 1. Crea un new_task EN MODO CODE (mode: "code") con contexto limpio y este objetivo
    (el modo Code es obligatorio: tiene acceso a las tools MCP y puede escribir ficheros;
    tú, como Orchestrator, NO puedes llamar a las tools qa-mcp directamente):
-   "Avanza el bucle E2E de qa-mcp para el RF pendiente (se resuelve solo desde disco):
+   "Deja EN VERDE el RF pendiente de qa-mcp (se resuelve solo desde disco):
     - Si no tiene spec: llama a generateE2ETests, escribe el .cy.js en la ruta EXACTA
-      indicada y llama a runE2ETests UNA vez.
-    - Si ya tiene spec: llama a runE2ETests UNA vez.
-    Si PASA, termina con attempt_completion indicando 'RF en verde'. Si FALLA, aplica
-    UNA sola corrección (reescribe el .cy.js con el PROMPT DE CORRECCIÓN) y termina con
-    attempt_completion SIN volver a llamar a runE2ETests. Copia en tu resumen la línea
-    QUEDA_TRABAJO de la SEÑAL DE SUBTASK."
+      indicada y llama a runE2ETests.
+    - Si ya tiene spec: llama a runE2ETests.
+    Si FALLA, aplica el PROMPT DE CORRECCIÓN (reescribe el .cy.js completo) y VUELVE A
+    LLAMAR a runE2ETests. Repite corrección→runE2ETests hasta que ESTE RF pase. NO cierres
+    la tarea con el RF en rojo. (Solo si el contexto se te llena, puedes cerrar y dejar
+    que otra tarea reanude ESTE MISMO RF desde disco.) Cuando pase, termina con
+    attempt_completion indicando 'RF en verde' y copia la línea QUEDA_TRABAJO de la
+    SEÑAL DE SUBTASK."
 2. Cuando el subtask termine, lee su resultado (la línea QUEDA_TRABAJO).
-3. Si QUEDA_TRABAJO: sí (siguiente RF o reintento del RF en curso), vuelve al paso 1.
+3. Si QUEDA_TRABAJO: sí (siguiente RF), vuelve al paso 1.
 4. Si QUEDA_TRABAJO: no (TODOS los RF en verde), termina.
 
-No generes ni ejecutes tests tú mismo: delega SIEMPRE cada unidad de trabajo en un
-subtask en modo Code con contexto limpio.
+No generes ni ejecutes tests tú mismo: delega SIEMPRE cada RF en un subtask en modo
+Code con contexto limpio.
 ```
 
 En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `generateE2ETests` ya genera, ejecuta e itera RF a RF por sí misma.

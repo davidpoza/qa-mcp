@@ -97,7 +97,7 @@ function clientSupportsSampling(): boolean {
  * porque ya no queda trabajo ("done"). En clientes sin subtasks es solo texto
  * informativo e inocuo.
  */
-function buildSubtaskSignal(mode: "advance" | "continue" | "retry" | "done"): string {
+function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
   const header =
     "--- SEÑAL DE SUBTASK (clientes con Orchestrator/Boomerang, p. ej. Roo Code) ---";
   const footer = "--- FIN SEÑAL DE SUBTASK ---";
@@ -114,14 +114,6 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "retry" | "done"): st
     "empiezas con contexto limpio. Cuando el RF esté en verde, termina con " +
     "attempt_completion. Si la tool responde que TODOS los RF están en verde, NO crees " +
     "más subtasks e informa de que el ciclo ha terminado.\"";
-  const retryDelegatePrompt =
-    "\"Continúa corrigiendo el RF E2E EN CURSO de qa-mcp (el primero no verde; se " +
-    "resuelve solo desde disco). Llama a runE2ETests: si PASA, termina con " +
-    "attempt_completion; si FALLA, aplica UNA sola corrección (reescribe el .cy.js en la " +
-    "ruta indicada con el PROMPT DE CORRECCIÓN) y termina con attempt_completion SIN volver " +
-    "a llamar a runE2ETests. El spec queda en disco; el siguiente intento lo hará otro " +
-    "subtask con contexto limpio.\"";
-
   if (mode === "done") {
     return [
       header,
@@ -136,17 +128,6 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "retry" | "done"): st
       "QUEDA_TRABAJO: sí (siguiente RF)",
       "El RF en curso YA está en verde. En modo Orchestrator: cierra ESTE subtask con attempt_completion y delega el SIGUIENTE RF en un new_task NUEVO (contexto limpio) con este objetivo:",
       delegatePrompt,
-      modeHint,
-      footer,
-    ].join("\n");
-  }
-  if (mode === "retry") {
-    return [
-      header,
-      "QUEDA_TRABAJO: sí (RF en curso, aún ROJO — reintento con CONTEXTO LIMPIO)",
-      "HIGIENE DE CONTEXTO: para NO llenar el contexto, aplica en ESTE subtask UNA sola corrección (reescribe el .cy.js con el PROMPT DE CORRECCIÓN) y CIÉRRALO con attempt_completion. NO vuelvas a llamar a runE2ETests aquí.",
-      "El PADRE debe delegar el SIGUIENTE intento (mismo RF pendiente) en un new_task NUEVO (contexto limpio) con este objetivo:",
-      retryDelegatePrompt,
       modeHint,
       footer,
     ].join("\n");
@@ -299,21 +280,23 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     `❌ ${single?.rf} — ${single?.name}: FALLA.`,
     `Progreso: ${green}/${total} RF en verde. Este RF NO avanza hasta que pase.`,
     "",
-    "QUÉ HACER AHORA (UN solo intento por subtask, para no llenar el contexto):",
+    "QUÉ HACER AHORA (BUCLE hasta verde — NO te detengas tras un solo intento):",
     "1) Diagnostica con la salida de Cypress de abajo y aplica el PROMPT DE CORRECCIÓN.",
-    "2) Reescribe el spec en su ruta (JavaScript PLANO, sin TypeScript). NO toques tsconfig ni errores de tipos.",
-    "3) En un cliente con subtasks (Roo Orchestrator): NO vuelvas a llamar a `runE2ETests` en este subtask; ciérralo y deja que el siguiente intento lo haga un subtask NUEVO con contexto limpio (ver SEÑAL DE SUBTASK). En un cliente SIN subtasks: vuelve a llamar a `runE2ETests` (mismo RF) hasta que pase.",
+    "2) Reescribe (SOBRESCRIBE) el spec completo en su ruta (JavaScript PLANO, sin TypeScript). NO toques tsconfig ni errores de tipos.",
+    "3) VUELVE A LLAMAR a `runE2ETests` (mismo RF) para verificar. Repite corrección→`runE2ETests` hasta que ESTE RF pase (green). NO cierres la tarea con el RF aún en rojo.",
+    "   · Solo si el contexto se te está llenando: puedes cerrar la tarea y dejar que una tarea/subtask NUEVA reanude ESTE MISMO RF (el spec y el estado están en disco; el servidor reengancha el primer RF no verde). Es un OFFLOAD opcional, no un fin del bucle.",
     "",
     `===== ${single?.rf} — ${single?.name} =====`,
     `Ruta del spec (reescribe aquí): ${single?.filePath}`,
+    single?.logPath ? `Log de feedback (raw Cypress + prompt, se sobrescribe cada iteración): ${single.logPath}` : "",
     "--- SALIDA DE CYPRESS (errores) ---",
     single?.output ?? "(sin salida)",
     "--- PROMPT DE CORRECCIÓN ---",
     single?.fixPrompt ?? "(no disponible)",
     "--- FIN PROMPT ---",
     "",
-    buildSubtaskSignal("retry"),
-  ]);
+    buildSubtaskSignal("continue"),
+  ].filter(Boolean));
 }
 
 registerToolCompat(

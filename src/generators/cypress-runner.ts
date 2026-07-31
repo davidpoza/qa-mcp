@@ -188,12 +188,45 @@ export async function repairCypressCache(params: {
  * Conserva la cola (que contiene los errores por test y el resumen final),
  * limitando el tamaño para no desbordar el contexto del modelo.
  */
+/**
+ * Extrae de la salida de Cypress lo IMPRESCINDIBLE para diagnosticar (el bloque
+ * numerado de fallos con su `AssertionError`/stack/code-frame), descartando el
+ * ruido que consume el presupuesto sin aportar nada (la lista de rutas de
+ * screenshots, larguísima). El recorte cabeza+cola ingenuo perdía justo el
+ * detalle de los fallos (queda en el medio), dejando al LLM sin la causa real.
+ */
 export function extractCypressFailureSummary(output: string, maxChars = 12000): string {
   const clean = stripAnsi(output).trim();
   if (clean.length <= maxChars) {
     return clean;
   }
-  const head = clean.slice(0, 1000);
-  const tail = clean.slice(clean.length - (maxChars - 1000));
+
+  // 1) Elimina la lista de rutas de screenshots (ruido: rutas absolutas largas
+  //    que se comen el presupuesto y no ayudan a diagnosticar el fallo).
+  const withoutShots = clean.replace(
+    /\n[ \t]*\(Screenshots\)[\s\S]*?(?=\n[ \t]*\(Run Finished\)|\n[ \t]*\(Results\)|$)/g,
+    "\n  (Screenshots) [omitidas]\n"
+  );
+  if (withoutShots.length <= maxChars) {
+    return withoutShots;
+  }
+
+  // 2) Prioriza el BLOQUE DE FALLOS: la lista numerada "N) <test>" con el
+  //    AssertionError/CypressError, el code-frame y el stack (`at ...:line:col`).
+  //    Es lo único que el LLM necesita para corregir el spec.
+  const failIdx = withoutShots.search(/\n[ \t]*\d+\)[ \t]+\S/);
+  if (failIdx >= 0) {
+    const head = withoutShots.slice(0, 800);
+    const budgetForFail = Math.max(0, maxChars - head.length - 120);
+    const failBlock = withoutShots.slice(failIdx, failIdx + budgetForFail);
+    return (
+      `${head}\n...\n[qa-mcp] (contexto recortado; se prioriza el DETALLE DE FALLOS)\n...` +
+      `${failBlock}`
+    );
+  }
+
+  // 3) Sin bloque numerado de fallos: recorte cabeza+cola tradicional.
+  const head = withoutShots.slice(0, 1000);
+  const tail = withoutShots.slice(withoutShots.length - (maxChars - 1000));
   return `${head}\n...\n[qa-mcp] (salida recortada)\n...\n${tail}`;
 }
