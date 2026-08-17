@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { LoadedContext, RfEntry } from "../types";
+import { LoadedContext, RfEntry, CuCase } from "../types";
 import { requireFrontendRoot } from "../config";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
@@ -11,6 +11,42 @@ function slug(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Unidad de trabajo del bucle E2E: UN Caso de Uso (CU) que se genera, ejecuta y
+ * corrige en su PROPIO fichero `.cy.js`. Aislar cada CU en su spec permite iterar
+ * más rápido (cada ejecución de Cypress corre solo ese CU) y avanzar CU-a-CU.
+ */
+interface CuUnit {
+  /** RF padre completo (para contexto/nombre). */
+  rf: RfEntry;
+  /** El CU concreto. */
+  cu: CuCase;
+  /** RfEntry con un ÚNICO caso (el CU): se pasa a los builders de prompt. */
+  entry: RfEntry;
+  /** Clave estable de estado/baseline: `${rf.id}.${cu.id}` (p. ej. "RF-1.CU-1"). */
+  unitId: string;
+  /** Base del nombre de fichero: `${slug(rf.id)}-${slug(cu.id)}-${slug(cu.name)}`. */
+  fileBase: string;
+}
+
+/** Expande una lista de RF en unidades de CU (una por caso de uso). */
+function expandToCuUnits(entries: RfEntry[]): CuUnit[] {
+  const units: CuUnit[] = [];
+  for (const rf of entries) {
+    const cases = rf.cases.length > 0 ? rf.cases : [{ id: "CU-1", name: rf.name, steps: [] }];
+    for (const cu of cases) {
+      units.push({
+        rf,
+        cu,
+        entry: { ...rf, cases: [cu] },
+        unitId: `${rf.id}.${cu.id}`,
+        fileBase: `${slug(rf.id)}-${slug(cu.id)}-${slug(cu.name)}`,
+      });
+    }
+  }
+  return units;
 }
 
 /** Valor por defecto del NO_PROXY para entornos internos de AENA. */
@@ -489,21 +525,21 @@ function buildE2EGenerationPrompt(params: {
 
   return [
     fix
-      ? "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que TODOS los `it()` pasen sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura de TODOS los Casos de Uso."
-      : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE en JavaScript PLANO (`.cy.js`) para el siguiente Requisito Funcional y sus Casos de Uso.",
+      ? "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que el `it()` de este CU pase sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura del Caso de Uso (NO lo elimines ni lo conviertas en `it.skip`)."
+      : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE en JavaScript PLANO (`.cy.js`) para el siguiente Requisito Funcional y UN ÚNICO Caso de Uso (un `describe` con un solo `it`).",
     "",
     `## Requisito funcional: ${entry.id} — ${entry.name}`,
     endpointLine,
     `- URL de arranque para \`cy.visit\`: ${visitUrl}`,
     "",
-    "## Casos de uso a implementar (un `it()` por CU, con su clave de baseline exacta):",
+    "## Casos de uso a implementar (este fichero cubre UN ÚNICO CU; genera un solo `it()` con su clave de baseline exacta):",
     formatCasesForPrompt(entry),
     "",
     "## Cómo implementar (OBLIGATORIO):",
     "- **JAVASCRIPT PLANO (CRÍTICO)**: el fichero es `.cy.js`, NO TypeScript. PROHIBIDO usar sintaxis TS: sin anotaciones de tipo (`: string`, `: number`, `param: Tipo`), sin aserciones `as` (`response.body as Array<...>`), sin `interface`/`type`, sin genéricos `<T>`, sin `!` de non-null. Escribe JavaScript ES2018 válido que un navegador ejecute sin transpilar tipos. (Cypress NO hace type-check; cualquier sintaxis TS rompe la ejecución del spec.)",
     "- Reutiliza los helpers compartidos importándolos de `../support/e2e-helpers` (NO reimplementes utilidades):",
     helperApiSummary(),
-    "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un `it` por CU (nombres `\"<CU-id> <nombre>\"`, en español).",
+    "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un ÚNICO `it` para el CU de ESTE fichero (cada CU vive en su propio spec; NO añadas otros CU ni `it` adicionales). Nombre del `it`: `\"<CU-id> <nombre>\"`, en español.",
     "- **REGLA CRÍTICA DE SELECTORES**: usa ÚNICAMENTE selectores que aparezcan LITERALMENTE en el código frontend proporcionado (busca `id=\"...\"`, `formcontrolname=\"...\"`, tags de componentes `app-*`/`empresas-ui-*`, clases CSS, `data-*`, y textos exactos de botones). PROHIBIDO inventar selectores a partir del `operationId` o de nombres en inglés del OpenAPI. Si el endpoint es `get-salesOrganizations` pero en el HTML el control es `id=\"sociedad\"`, DEBES usar `#sociedad`, nunca `[formcontrolname='salesOrganization']`.",
     "- Antes de escribir cada selector, localízalo en el bloque de código frontend. Si un campo/desplegable no existe con ese nombre, busca el equivalente real (a menudo en español) en las plantillas.",
     "- **CONTROLES CUSTOM (MUY IMPORTANTE)**: muchos controles son web components que envuelven un elemento nativo (p. ej. `<empresas-ui-dropdown id=\"sociedad\">` contiene un `<select>` nativo, `<empresas-ui-input>` contiene un `<input>`). NUNCA llames `.select()` ni `.find('option')` directamente sobre el wrapper custom: fallará (`cy.select() can only be called on a <select>`). En su lugar:",
@@ -575,7 +611,7 @@ function buildE2EGenerationPrompt(params: {
       : "",
     "",
     "## Salida:",
-    "Devuelve ÚNICAMENTE el contenido del fichero `.cy.js`, sin explicaciones y sin vallas de código (` ``` `). Debe empezar por el `require` de `../support/e2e-helpers` y contener el `describe` con todos los `it` implementados de forma ejecutable.",
+    "Devuelve ÚNICAMENTE el contenido del fichero `.cy.js`, sin explicaciones y sin vallas de código (` ``` `). Debe empezar por el `require` de `../support/e2e-helpers` y contener el `describe` con el ÚNICO `it` de este CU, implementado de forma ejecutable.",
   ].join("\n");
 }
 
@@ -1224,7 +1260,20 @@ async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void>
  * (p. ej. `rf-01.cu-1`), para que cada re-ejecución dentro del bucle de
  * corrección vuelva a autocapturar y no falle por deriva del baseline previo.
  */
-async function clearBaselineForRf(frontendRoot: string, rfId: string): Promise<void> {
+/**
+ * Borra del baseline SOLO la clave exacta de un CU (`RF-1.CU-1`) y sus posibles
+ * subclaves (`RF-1.CU-1.*`), sin tocar las de otros CU del mismo RF (p. ej. NO
+ * borra `RF-1.CU-10`). Necesario ahora que cada CU vive en su propio spec.
+ */
+async function clearBaselineForCu(frontendRoot: string, unitId: string): Promise<void> {
+  const key = unitId.toLowerCase();
+  await clearBaselineMatching(frontendRoot, (k) => k === key || k.startsWith(`${key}.`));
+}
+
+async function clearBaselineMatching(
+  frontendRoot: string,
+  match: (lowerKey: string) => boolean
+): Promise<void> {
   const fixturesPath = path.resolve(frontendRoot, baselineFixtureRelativePath);
   const raw = await readTextIfExists(fixturesPath);
   if (!raw) return;
@@ -1234,10 +1283,9 @@ async function clearBaselineForRf(frontendRoot: string, rfId: string): Promise<v
   } catch {
     return;
   }
-  const prefix = `${rfId.toLowerCase()}.`;
   let changed = false;
   for (const key of Object.keys(data)) {
-    if (key.toLowerCase().startsWith(prefix)) {
+    if (match(key.toLowerCase())) {
       delete data[key];
       changed = true;
     }
@@ -1273,7 +1321,13 @@ export async function generateE2ETests(
   context: LoadedContext,
   sample: E2ESampleFn,
   options: GenerateE2EOptions = {}
-): Promise<{ files: string[]; rfCount: number; iterations: E2EIterationResult[] }> {
+): Promise<{
+  files: string[];
+  rfCount: number;
+  iterations: E2EIterationResult[];
+  greenCount: number;
+  skippedGreenCount: number;
+}> {
   const {
     promptOverride,
     runTests = true,
@@ -1306,39 +1360,69 @@ export async function generateE2ETests(
   const visitUrl = context.config.e2eBaseUrl ?? "/";
 
   const frontendRoot = requireFrontendRoot(context);
-  const sources = await readFrontendSources(frontendRoot);
   const openApiContext = openApiSnippet(context.openApiContent);
 
-  for (const entry of entries) {
-    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
-    const fullPath = path.join(outputRoot, fileName);
+  const units = expandToCuUnits(entries);
+  const initialStatus = await readE2EStatus(outputRoot);
+  const targets = await Promise.all(
+    units.map(async (unit) => {
+      const fullPath = path.join(outputRoot, `${unit.fileBase}.cy.js`);
+      return {
+        unit,
+        fullPath,
+        exists: await fileExists(fullPath),
+      };
+    })
+  );
+  const pendingTargets = targets.filter(
+    (target) => !(target.exists && isRfGreen(initialStatus, target.unit.unitId))
+  );
+  const skippedGreenCount = targets.length - pendingTargets.length;
+  const sources = pendingTargets.length > 0 ? await readFrontendSources(frontendRoot) : [];
+
+  for (const target of pendingTargets) {
+    const { unit, fullPath } = target;
+    const entry = unit.entry;
+    const fileName = `${unit.fileBase}.cy.js`;
     const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
 
     const promptData = await loadE2EPrompt(context, entry, undefined, promptOverride);
     const frontendContext = buildRfFocusedBundle(sources, entry);
 
-    const generationPrompt = buildE2EGenerationPrompt({
-      entry,
-      rules: promptData.text,
-      frontendContext,
-      visitUrl,
-      openApiContext,
-      promptOverride,
-    });
+    if (!target.exists) {
+      // Un estado verde sin fichero es inconsistente: el CU vuelve a estar pendiente.
+      if (isRfGreen(initialStatus, unit.unitId)) {
+        await setRfGreen(outputRoot, unit.unitId, false);
+      }
 
-    const generated = await sample(generationPrompt, 16000);
-    if (!generated || generated.trim().length === 0) {
-      throw new Error(
-        `El modelo no devolvió contenido para el spec E2E de ${entry.id}. ` +
-          "Verifica que el cliente MCP soporte sampling (createMessage)."
-      );
+      const generationPrompt = buildE2EGenerationPrompt({
+        entry,
+        rules: promptData.text,
+        frontendContext,
+        visitUrl,
+        openApiContext,
+        promptOverride,
+      });
+
+      const generated = await sample(generationPrompt, 16000);
+      if (!generated || generated.trim().length === 0) {
+        throw new Error(
+          `El modelo no devolvió contenido para el spec E2E de ${unit.unitId}. ` +
+            "Verifica que el cliente MCP soporte sampling (createMessage)."
+        );
+      }
+
+      await fs.writeFile(fullPath, sanitizeGeneratedSpec(generated), "utf8");
+      files.push(fullPath);
     }
 
-    await fs.writeFile(fullPath, sanitizeGeneratedSpec(generated), "utf8");
-    files.push(fullPath);
-
     if (!runTests) {
-      iterations.push({ rf: entry.id, file: fullPath, passed: false, attempts: 1 });
+      iterations.push({
+        rf: unit.unitId,
+        file: fullPath,
+        passed: false,
+        attempts: target.exists ? 0 : 1,
+      });
       continue;
     }
 
@@ -1348,7 +1432,7 @@ export async function generateE2ETests(
 
     for (let attempt = 1; attempt <= maxIterations; attempt++) {
       attempts = attempt;
-      await clearBaselineForRf(frontendRoot, entry.id);
+      await clearBaselineForCu(frontendRoot, unit.unitId);
 
       const run = await runCypressSpecWithRepair({
         frontendRoot,
@@ -1361,9 +1445,11 @@ export async function generateE2ETests(
 
       if (run.passed) {
         passed = true;
+        await setRfGreen(outputRoot, unit.unitId, true);
         await writeRfFeedbackLog({
           outputRoot,
           entry,
+          cu: unit.cu,
           specFileName: fileName,
           specPath: fullPath,
           runCommand,
@@ -1373,11 +1459,14 @@ export async function generateE2ETests(
         break;
       }
 
+      await setRfGreen(outputRoot, unit.unitId, false);
+
       if (run.cacheError) {
         lastOutput = `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${run.output}`;
         await writeRfFeedbackLog({
           outputRoot,
           entry,
+          cu: unit.cu,
           specFileName: fileName,
           specPath: fullPath,
           runCommand,
@@ -1392,6 +1481,7 @@ export async function generateE2ETests(
         await writeRfFeedbackLog({
           outputRoot,
           entry,
+          cu: unit.cu,
           specFileName: fileName,
           specPath: fullPath,
           runCommand,
@@ -1420,6 +1510,7 @@ export async function generateE2ETests(
       await writeRfFeedbackLog({
         outputRoot,
         entry,
+        cu: unit.cu,
         specFileName: fileName,
         specPath: fullPath,
         runCommand,
@@ -1432,11 +1523,14 @@ export async function generateE2ETests(
       const fixed = await sample(fixPrompt, 16000);
       if (fixed && fixed.trim().length > 0) {
         await fs.writeFile(fullPath, sanitizeGeneratedSpec(fixed), "utf8");
+        if (!files.includes(fullPath)) {
+          files.push(fullPath);
+        }
       }
     }
 
     iterations.push({
-      rf: entry.id,
+      rf: unit.unitId,
       file: fullPath,
       passed,
       attempts,
@@ -1444,7 +1538,15 @@ export async function generateE2ETests(
     });
   }
 
-  return { files, rfCount: entries.length, iterations };
+  const finalStatus = await readE2EStatus(outputRoot);
+  const greenCount = units.filter((unit) => isRfGreen(finalStatus, unit.unitId)).length;
+  return {
+    files,
+    rfCount: units.length,
+    iterations,
+    greenCount,
+    skippedGreenCount,
+  };
 }
 
 export interface E2EFallbackSpec {
@@ -1519,7 +1621,7 @@ async function readE2EStatus(outputRoot: string): Promise<Record<string, E2EStat
 }
 
 function isRfGreen(status: Record<string, E2EStatusEntry>, rfId: string): boolean {
-  return Boolean(status[rfId.toLowerCase()]?.green);
+  return status[rfId.toLowerCase()]?.green === true;
 }
 
 async function setRfGreen(outputRoot: string, rfId: string, green: boolean): Promise<void> {
@@ -1579,20 +1681,24 @@ export async function prepareE2EFallback(
   const visitUrl = context.config.e2eBaseUrl ?? "/";
   const frontendRoot = requireFrontendRoot(context);
   const openApiContext = openApiSnippet(context.openApiContent);
-  const totalCount = entries.length;
+  const units = expandToCuUnits(entries);
+  const totalCount = units.length;
   const status = await readE2EStatus(outputRoot);
 
   const targets = await Promise.all(
-    entries.map(async (entry) => {
-      const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
+    units.map(async (unit) => {
+      const entry = unit.entry;
+      const fileName = `${unit.fileBase}.cy.js`;
       const fullPath = path.join(outputRoot, fileName);
       const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
+      const exists = await fileExists(fullPath);
       return {
+        unit,
         entry,
         fullPath,
         specRelPath,
-        exists: await fileExists(fullPath),
-        green: isRfGreen(status, entry.id),
+        exists,
+        green: exists && isRfGreen(status, unit.unitId),
       };
     })
   );
@@ -1620,8 +1726,8 @@ export async function prepareE2EFallback(
     }
 
     const currentInfo = {
-      rf: current.entry.id,
-      name: current.entry.name,
+      rf: current.unit.rf.id,
+      name: `${current.unit.cu.id} — ${current.unit.cu.name}`,
       filePath: current.fullPath,
       specRelPath: current.specRelPath,
     };
@@ -1659,8 +1765,8 @@ export async function prepareE2EFallback(
     return {
       specs: [
         {
-          rf: current.entry.id,
-          name: current.entry.name,
+          rf: current.unit.rf.id,
+          name: `${current.unit.cu.id} — ${current.unit.cu.name}`,
           filePath: current.fullPath,
           specRelPath: current.specRelPath,
           prompt: generationPrompt,
@@ -1702,8 +1808,8 @@ export async function prepareE2EFallback(
     });
 
     specs.push({
-      rf: target.entry.id,
-      name: target.entry.name,
+      rf: target.unit.rf.id,
+      name: `${target.unit.cu.id} — ${target.unit.cu.name}`,
       filePath: target.fullPath,
       specRelPath: target.specRelPath,
       prompt: generationPrompt,
@@ -1777,6 +1883,7 @@ export interface E2ERunFallbackResult {
 async function writeRfFeedbackLog(params: {
   outputRoot: string;
   entry: RfEntry;
+  cu?: CuCase;
   specFileName: string;
   specPath: string;
   runCommand?: string;
@@ -1788,8 +1895,9 @@ async function writeRfFeedbackLog(params: {
   const logName = params.specFileName.replace(/\.cy\.js$/i, "") + ".log";
   const logPath = path.join(params.outputRoot, logName);
   const sep = (title: string) => `\n===== ${title} =====\n`;
+  const cuLabel = params.cu ? ` · ${params.cu.id} ${params.cu.name}` : "";
   const body = [
-    `[qa-mcp] Feedback E2E — ${params.entry.id} — ${params.entry.name}`,
+    `[qa-mcp] Feedback E2E — ${params.entry.id} — ${params.entry.name}${cuLabel}`,
     `Generado: ${new Date().toISOString()}`,
     `Spec: ${params.specPath}`,
     `Comando Cypress: ${params.runCommand ?? "npx cypress run"}`,
@@ -1859,9 +1967,10 @@ export async function runE2EFallback(
   const frontendRoot = requireFrontendRoot(context);
   const openApiContext = openApiSnippet(context.openApiContent);
 
-  const scopeCount = entries.length;
+  const scopeCount = expandToCuUnits(entries).length;
   const status = await readE2EStatus(outputRoot);
-  const priorGreen = entries.filter((e) => isRfGreen(status, e.id)).length;
+  let units = expandToCuUnits(entries);
+  const priorGreen = units.filter((u) => isRfGreen(status, u.unitId)).length;
   const rt = resolveE2ERuntime(context);
   const diag = {
     configPath: context.configPath,
@@ -1869,10 +1978,10 @@ export async function runE2EFallback(
     browser: rt.browser,
   };
 
-  // Modo RF-a-RF-hasta-verde: ejecuta SOLO el RF en curso (el primero no verde,
+  // Modo CU-a-CU-hasta-verde: ejecuta SOLO el CU en curso (el primero no verde,
   // o el indicado por rfFilter), para acotar la salida y el contexto del cliente.
   if (untilGreen) {
-    const target = entries.find((e) => !isRfGreen(status, e.id));
+    const target = units.find((u) => !isRfGreen(status, u.unitId));
     if (!target) {
       return {
         results: [],
@@ -1885,11 +1994,12 @@ export async function runE2EFallback(
         nextAction: "done",
       };
     }
-    entries = [target];
+    units = [target];
   }
 
   interface Failure {
     result: E2ERunFixResult;
+    unit: CuUnit;
     entry: RfEntry;
     currentSpec: string;
     rawOutput: string;
@@ -1900,8 +2010,11 @@ export async function runE2EFallback(
   const results: E2ERunFixResult[] = [];
   const failures: Failure[] = [];
 
-  for (const entry of entries) {
-    const fileName = `${slug(entry.id)}-${slug(entry.name)}.cy.js`;
+  for (const unit of units) {
+    const entry = unit.entry;
+    const cuRf = unit.rf.id;
+    const cuName = `${unit.cu.id} — ${unit.cu.name}`;
+    const fileName = `${unit.fileBase}.cy.js`;
     const fullPath = path.join(outputRoot, fileName);
     const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
 
@@ -1910,8 +2023,8 @@ export async function runE2EFallback(
       currentSpec = await fs.readFile(fullPath, "utf8");
     } catch {
       results.push({
-        rf: entry.id,
-        name: entry.name,
+        rf: cuRf,
+        name: cuName,
         filePath: fullPath,
         specRelPath,
         passed: false,
@@ -1920,7 +2033,7 @@ export async function runE2EFallback(
       continue;
     }
 
-    await clearBaselineForRf(frontendRoot, entry.id);
+    await clearBaselineForCu(frontendRoot, unit.unitId);
     const run = await runCypressSpecWithRepair({
       frontendRoot,
       specRelPath,
@@ -1930,10 +2043,10 @@ export async function runE2EFallback(
     });
 
     if (run.passed) {
-      await setRfGreen(outputRoot, entry.id, true);
+      await setRfGreen(outputRoot, unit.unitId, true);
       const passResult: E2ERunFixResult = {
-        rf: entry.id,
-        name: entry.name,
+        rf: cuRf,
+        name: cuName,
         filePath: fullPath,
         specRelPath,
         passed: true,
@@ -1942,6 +2055,7 @@ export async function runE2EFallback(
       passResult.logPath = await writeRfFeedbackLog({
         outputRoot,
         entry,
+        cu: unit.cu,
         specFileName: fileName,
         specPath: fullPath,
         runCommand,
@@ -1952,12 +2066,12 @@ export async function runE2EFallback(
       continue;
     }
 
-    await setRfGreen(outputRoot, entry.id, false);
+    await setRfGreen(outputRoot, unit.unitId, false);
 
     if (run.cacheError) {
       const cacheResult: E2ERunFixResult = {
-        rf: entry.id,
-        name: entry.name,
+        rf: cuRf,
+        name: cuName,
         filePath: fullPath,
         specRelPath,
         passed: false,
@@ -1968,6 +2082,7 @@ export async function runE2EFallback(
       cacheResult.logPath = await writeRfFeedbackLog({
         outputRoot,
         entry,
+        cu: unit.cu,
         specFileName: fileName,
         specPath: fullPath,
         runCommand,
@@ -1980,8 +2095,8 @@ export async function runE2EFallback(
     }
 
     const result: E2ERunFixResult = {
-      rf: entry.id,
-      name: entry.name,
+      rf: cuRf,
+      name: cuName,
       filePath: fullPath,
       specRelPath,
       passed: false,
@@ -1989,7 +2104,7 @@ export async function runE2EFallback(
       output: extractCypressFailureSummary(run.output, 2000),
     };
     results.push(result);
-    failures.push({ result, entry, currentSpec, rawOutput: run.output, fileName, fullPath });
+    failures.push({ result, unit, entry, currentSpec, rawOutput: run.output, fileName, fullPath });
   }
 
   const failuresToFix = oneFixAtATime ? failures.slice(0, 1) : failures;
@@ -2017,6 +2132,7 @@ export async function runE2EFallback(
       failure.result.logPath = await writeRfFeedbackLog({
         outputRoot,
         entry: failure.entry,
+        cu: failure.unit.cu,
         specFileName: failure.fileName,
         specPath: failure.fullPath,
         runCommand,
@@ -2028,13 +2144,14 @@ export async function runE2EFallback(
     }
   }
 
-  // Fallos que NO entran en failuresToFix (multi-RF con oneFixAtATime): persiste
+  // Fallos que NO entran en failuresToFix (multi-CU con oneFixAtATime): persiste
   // igualmente su log con la salida real, aunque sin prompt de corrección.
   for (const failure of failures) {
     if (failure.result.logPath) continue;
     failure.result.logPath = await writeRfFeedbackLog({
       outputRoot,
       entry: failure.entry,
+      cu: failure.unit.cu,
       specFileName: failure.fileName,
       specPath: failure.fullPath,
       runCommand,
@@ -2046,12 +2163,12 @@ export async function runE2EFallback(
 
   if (untilGreen) {
     const status2 = await readE2EStatus(outputRoot);
-    const allEntries = extractOrBuildRfEntries(context);
-    const scopeEntries =
+    const allUnits = expandToCuUnits(extractOrBuildRfEntries(context));
+    const scopeUnits =
       rfFilter && rfFilter.length > 0
-        ? allEntries.filter((e) => rfFilter.map((id) => id.toLowerCase()).includes(e.id.toLowerCase()))
-        : allEntries;
-    const greenCount = scopeEntries.filter((e) => isRfGreen(status2, e.id)).length;
+        ? allUnits.filter((u) => rfFilter.map((id) => id.toLowerCase()).includes(u.rf.id.toLowerCase()))
+        : allUnits;
+    const greenCount = scopeUnits.filter((u) => isRfGreen(status2, u.unitId)).length;
     const single = results[0];
     let nextAction: E2ERunFallbackResult["nextAction"];
     if (single?.missing) {
