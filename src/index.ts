@@ -143,6 +143,23 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
 }
 
 /**
+ * Contrato embebido en las respuestas del modo asistido. Un cliente sin
+ * sampling usa su propio LLM para escribir/corregir los specs; por eso la tool
+ * debe ordenarle explícitamente que encadene todos los pasos sin devolver el
+ * control al usuario después de cada CU.
+ */
+function buildAssistedAutoContinueMandate(): string {
+  return [
+    "--- MANDATO INTEGRADO DE AUTOCONTINUACIÓN ---",
+    "Esta respuesta es un paso intermedio, NO el final de la tarea.",
+    "TÚ, el agente cliente, DEBES ejecutar ahora las instrucciones devueltas, escribir/corregir el spec y encadenar las llamadas `runE2ETests` y `generateE2ETests` que hagan falta.",
+    "NO pidas confirmación al usuario entre CU, NO te detengas al dejar un único CU en verde y NO cierres la tarea mientras quede trabajo.",
+    "Continúa autónomamente hasta que una respuesta indique expresamente que TODOS los CU están en verde. Si dispones de Orchestrator/subtasks, sigue además la SEÑAL DE SUBTASK incluida al final.",
+    "--- FIN MANDATO INTEGRADO ---",
+  ].join("\n");
+}
+
+/**
  * Construye la salida del modo ASISTIDO de generateE2ETests (bucle RF-a-RF hasta
  * verde). Según `nextAction` indica al agente si debe generar el spec del RF en
  * curso, ejecutarlo con `runE2ETests`, o si ya está todo en verde.
@@ -150,9 +167,9 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
 function formatE2EFallback(fallback: E2EFallbackResult): string {
   const cleanContextTip =
     "CONTEXTO LIMPIO: el progreso se guarda en disco (specs + estado verde). " +
-    "Para evitar que el contexto se llene, " +
-    "INICIA UNA TAREA NUEVA en el cliente entre CU y vuelve a llamar a esta tool: " +
-    "el servidor continúa automáticamente por el siguiente CU pendiente.";
+    "Si el cliente permite crear subtasks, delega AUTOMÁTICAMENTE el siguiente CU con contexto limpio; " +
+    "si no, continúa en esta misma tarea. NO pidas al usuario que inicie otra tarea: " +
+    "el servidor resuelve automáticamente el siguiente CU pendiente.";
 
   if (fallback.nextAction === "done") {
     return [
@@ -170,6 +187,8 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     return [
       `⚠️ MODO ASISTIDO (bucle CU-a-CU): el spec de ${c?.rf} — ${c?.name} YA existe pero aún no está en verde.`,
       `Progreso: ${fallback.greenCount}/${fallback.totalCount} CU en verde.`,
+      "",
+      buildAssistedAutoContinueMandate(),
       "",
       "QUÉ HACER AHORA:",
       "1) NO regeneres el spec. Llama a `runE2ETests` para EJECUTARLO y obtener el feedback real de Cypress.",
@@ -191,6 +210,8 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     "El entorno Cypress YA está preparado (helpers, config y baseline escritos).",
     "",
     `Progreso: ${fallback.greenCount}/${fallback.totalCount} CU en verde. Este mensaje contiene el CU EN CURSO (uno a uno; cada CU es un fichero .cy.js propio y no se avanza al siguiente hasta que este pase).`,
+    "",
+    buildAssistedAutoContinueMandate(),
     "",
     "QUÉ HACER AHORA:",
     "1) Genera el contenido del `.cy.js` (JavaScript PLANO, sin TypeScript) siguiendo EXACTAMENTE el PROMPT de abajo. UN solo CU (un `describe` con un único `it`) por fichero.",
@@ -219,8 +240,9 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
  */
 function formatE2ERun(run: E2ERunFallbackResult): string {
   const cleanContextTip =
-    "CONTEXTO LIMPIO: el progreso está en disco. Para el siguiente CU, INICIA UNA TAREA NUEVA " +
-    "y llama a `generateE2ETests`; el servidor continúa por el CU pendiente.";
+    "CONTEXTO LIMPIO: el progreso está en disco. Para el siguiente CU, llama a `generateE2ETests` " +
+    "automáticamente. Si dispones de subtasks, delega uno con contexto limpio; si no, continúa aquí. " +
+    "NO pidas intervención al usuario.";
   const diagLine =
     `[qa-mcp] Config cargada: ${run.configPath ?? "(desconocida)"} | ` +
     `headed: ${run.headed ? "sí (--headed)" : "no"}` +
@@ -244,6 +266,9 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       `El CU en curso (${single?.rf ?? "?"} — ${single?.name ?? ""}) aún no tiene spec.`,
       `Progreso: ${green}/${total} CU en verde.`,
+      "",
+      buildAssistedAutoContinueMandate(),
+      "",
       "Llama a `generateE2ETests` para obtener su prompt de generación, escribe el `.cy.js` y vuelve a `runE2ETests`.",
       single ? `Ruta esperada del spec: ${single.filePath}` : "",
       "",
@@ -255,6 +280,8 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       `✅ ${single?.rf} — ${single?.name}: PASA. Marcado en verde.`,
       `Progreso: ${green}/${total} CU en verde.`,
+      "",
+      buildAssistedAutoContinueMandate(),
       "",
       "Siguiente paso: pasa al siguiente CU llamando a `generateE2ETests`.",
       cleanContextTip,
@@ -270,6 +297,8 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
       `⚠️ ${single?.rf} — ${single?.name}: Cypress NO arrancó por un error de ENTORNO (caché V8), no del spec.`,
       `Progreso: ${green}/${total} CU en verde.`,
       "",
+      buildAssistedAutoContinueMandate(),
+      "",
       "NO reescribas el spec: no soluciona nada. Repara la caché de Cypress y reintenta.",
       single?.output ?? "(sin salida)",
       "",
@@ -279,6 +308,8 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
   return withDiag([
     `❌ ${single?.rf} — ${single?.name}: FALLA.`,
     `Progreso: ${green}/${total} CU en verde. Este CU NO avanza hasta que pase.`,
+    "",
+    buildAssistedAutoContinueMandate(),
     "",
     "QUÉ HACER AHORA (BUCLE hasta verde — NO te detengas tras un solo intento):",
     "1) Diagnostica con la salida de Cypress de abajo y aplica el PROMPT DE CORRECCIÓN.",
@@ -344,7 +375,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Herramienta AUTÓNOMA y reanudable: obtiene los RF/CU de rf-cu.md o los deriva de OpenAPI, consulta .qa-mcp-e2e-status.json, omite los CU que ya tienen spec y green: true, genera los specs que faltan y ejecuta/repara los existentes que no están en verde. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Sin MCP sampling (modo asistido): trabaja UN CU en curso por llamada (el primero no verde); si falta el spec devuelve su prompt de generación y, si existe, indica ejecutarlo con runE2ETests hasta que pase. El progreso se guarda EN DISCO, así que es reanudable desde una tarea nueva con contexto limpio.",
+  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Herramienta AUTÓNOMA y reanudable: obtiene los RF/CU de rf-cu.md o los deriva de OpenAPI, consulta .qa-mcp-e2e-status.json, omite los CU que ya tienen spec y green: true, genera los specs que faltan y ejecuta/repara los existentes que no están en verde. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Sin MCP sampling (modo asistido), su propia respuesta incorpora el MANDATO que el agente cliente debe seguir: generar/escribir el CU indicado, llamar a runE2ETests, corregir hasta verde y volver a generateE2ETests para el siguiente CU, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. El usuario solo necesita invocar generateE2ETests una vez; el agente debe encadenar las siguientes llamadas. El progreso se guarda EN DISCO y es reanudable.",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),
@@ -415,7 +446,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "runE2ETests",
-  "EJECUTA en Cypress el RF EN CURSO (el primero no verde, o el indicado en rfFilter) y devuelve el resultado como feedback. Si pasa, lo marca en verde (en disco) y te indica avanzar al siguiente RF con generateE2ETests; si falla, incluye la salida real de Cypress + un PROMPT DE CORRECCIÓN para reescribir el spec y volver a llamar hasta que pase. Cierra el bucle RF-a-RF-hasta-verde en clientes SIN sampling (Roo/Cline/opencode). Ejecuta solo un RF por llamada para no desbordar el contexto; el progreso persiste en disco (reanudable desde una tarea nueva).",
+  "EJECUTA en Cypress el CU EN CURSO (el primero no verde, o el perteneciente al rfFilter indicado) y devuelve feedback. Es parte del bucle autónomo asistido: el agente cliente DEBE aplicar el prompt de corrección y volver a llamar hasta que el CU pase; cuando pase, DEBE llamar a generateE2ETests para continuar con el siguiente, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. Cada respuesta incorpora este mandato. Ejecuta solo un CU por llamada para no desbordar el contexto y persiste el progreso en disco.",
   {
     rfFilter: z.array(z.string()).optional(),
     promptOverride: z.string().optional(),
@@ -435,7 +466,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "exportETPAsExcel",
-  "Exporta el ETP a Excel usando exceljs y plantilla configurada.",
+  "Genera un ETP Excel con la misma estructura y estilos de evidence.excelTemplate (evidences.xlsx). Sustituye las filas de ejemplo de la plantilla por una fila para CADA método @Test Rest Assured y cada it()/test() Cypress encontrado en los directorios configurados, relacionándolos con RF/CU y reflejando el estado green/log de E2E cuando existe. No se limita a listar ficheros.",
   {
     outputFileName: z.string().optional(),
   },

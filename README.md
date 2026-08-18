@@ -18,16 +18,14 @@ Para `generateE2ETests`, la generación es **genérica y guiada por LLM** (MCP s
 - `autoCompleteRfCu` **devuelve el prompt** y la ruta de salida para que el agente genere y escriba `rf-cu.md`.
 - El modo asistido se activa **automáticamente** al detectar la falta de sampling. También puedes forzarlo con el parámetro `assisted: true` en la invocación.
 
-> **Decenas de CU sin llamadas manuales:** sin MCP sampling, el servidor no puede generar por sí solo el contenido de los specs, por lo que técnicamente el flujo necesita varias llamadas MCP (`generateE2ETests` → escribir spec → `runE2ETests` → corregir/volver a ejecutar → siguiente CU). Esto **no significa que el usuario tenga que invocar manualmente la tool por cada CU**: si el cliente es un agente capaz de encadenar tools y editar ficheros, basta con darle **una única instrucción** para que complete el bucle entero. El agente hará internamente todas las llamadas necesarias y `.qa-mcp-e2e-status.json` conservará el progreso. Solo los clientes que tampoco puedan encadenar tools autónomamente requerirán llamadas manuales o un orquestador.
+> **Decenas de CU sin llamadas ni prompts manuales:** sin MCP sampling, el servidor no puede generar por sí solo el contenido de los specs, por lo que técnicamente el flujo necesita varias llamadas MCP (`generateE2ETests` → escribir spec → `runE2ETests` → corregir/volver a ejecutar → siguiente CU). El usuario, sin embargo, **solo tiene que invocar `generateE2ETests` una vez**. La descripción de la tool y todas sus respuestas asistidas ya incorporan un **MANDATO DE AUTOCONTINUACIÓN** para que el agente escriba/corrija los specs y encadene las llamadas necesarias sin pedir confirmación ni detenerse entre CU. `.qa-mcp-e2e-status.json` conserva el progreso. Si el cliente no puede encadenar tools, será necesario usar un orquestador; esa es una limitación del cliente, no hace falta suplirla con un prompt del usuario.
 
-Prompt listo para dar al agente en un cliente sin sampling:
+Invocación inicial en modo asistido (también se activa automáticamente cuando no hay sampling):
 
-```text
-Ejecuta el ciclo E2E completo hasta dejar todos los CU en verde. Llama a
-generateE2ETests, escribe cada spec en la ruta exacta indicada y llama a
-runE2ETests. Si falla, aplica el prompt de corrección y vuelve a ejecutar el
-mismo CU hasta que pase. Continúa automáticamente con los siguientes CU hasta
-que la tool indique que todos están en verde. No me pidas confirmación entre CU.
+```json
+{
+  "assisted": true
+}
 ```
 
 **Bucle de auto-corrección en modo asistido (`runE2ETests`), CU a CU hasta verde:** aunque el cliente no tenga sampling, el servidor **sí puede ejecutar Cypress** y devolver el resultado como feedback. El flujo trabaja **un CU en curso cada vez** (el primero que no está en verde) y **no avanza al siguiente hasta que el actual pasa**:
@@ -36,7 +34,7 @@ que la tool indique que todos están en verde. No me pidas confirmación entre C
 3. El agente aplica el prompt reescribiendo el fichero y **vuelve a llamar** a `runE2ETests` (mismo CU) hasta que pase.
 4. Con el CU en verde, se llama de nuevo a `generateE2ETests` para el **siguiente** CU. Repetir hasta que todos estén en verde.
 
-**Contexto limpio por CU:** todo el estado vive en **disco** (los `.cy.js` + `.qa-mcp-e2e-status.json` con los CU en verde), no en la conversación del cliente. Por eso el bucle es **reanudable desde una tarea nueva**: cuando el contexto del cliente empiece a llenarse, **inicia una tarea nueva** y vuelve a llamar a `generateE2ETests`; el servidor detecta el siguiente CU pendiente automáticamente y continúa desde ahí con contexto limpio. Cada llamada emite solo el CU en curso (frontend como lista de rutas, no código embebido) para minimizar el footprint.
+**Contexto limpio por CU:** todo el estado vive en **disco** (los `.cy.js` + `.qa-mcp-e2e-status.json` con los CU en verde), no en la conversación del cliente. Por eso el bucle es reanudable: si el cliente admite subtasks, el mandato integrado le indica que delegue automáticamente el siguiente CU con contexto limpio; si no, continúa en la tarea actual. El usuario no tiene que iniciar otra tarea ni repetir la instrucción. El servidor detecta el siguiente CU pendiente automáticamente y cada llamada emite solo el CU en curso (frontend como lista de rutas, no código embebido) para minimizar el footprint.
 
 **Automatizar el contexto limpio con subtasks (Roo Code / Orchestrator):** en clientes con orquestación de subtasks (Boomerang / Orchestrator, p. ej. **Roo Code**), no hace falta iniciar la tarea nueva a mano. Cada respuesta de `generateE2ETests` / `runE2ETests` incluye una **`SEÑAL DE SUBTASK`** con un campo `QUEDA_TRABAJO` (sí/no) y la instrucción de si seguir en el mismo subtask o delegar el siguiente paso en un `new_task` con contexto limpio. Como todo el estado está en disco, cada subtask arranca limpio y el servidor resuelve solo el CU pendiente.
 
@@ -81,6 +79,20 @@ En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `gene
 - `rfFilter` (array de ids, opcional): limita a ciertos RF, p. ej. `["RF-01","RF-03"]`.
 - `promptOverride` (string, opcional).
 Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe acumulado y un extracto de la salida de Cypress para los CU que siguen fallando.
+
+## Exportación del ETP a Excel
+
+`exportETPAsExcel` genera un libro con la misma tabla y estilos de la plantilla configurada en `evidence.excelTemplate`. Si esa ruta no existe en el proyecto consumidor, usa automáticamente el `templates/evidences.xlsx` empaquetado con `qa-mcp`. Las filas de ejemplo que contenga la plantilla se eliminan y se sustituyen por los tests reales disponibles:
+
+- una fila `REST-NNN` por cada método Java anotado con `@Test` encontrado bajo `restTests`;
+- una fila `E2E-NNN` por cada `it()` o `test()` encontrado en los `.cy.js` bajo `e2eTests`;
+- RF, CU, objetivo y acciones se obtienen de `rf-cu.md` cuando el test puede relacionarse con él;
+- las filas se ordenan por `R. Funcional` y, dentro de cada requisito, por `Nombre` (CU), usando orden natural para los identificadores numéricos;
+- los E2E usan `.qa-mcp-e2e-status.json` y su `.log` para mostrar `OK`, `KO`, `PASS` o `FAIL`;
+- los Rest Assured se muestran como `NO EJECUTADO` porque `generateRestTests` genera el código, pero no lo ejecuta ni persiste resultados;
+- `it.skip` y `@Disabled` se muestran como `OMITIDO`.
+
+La tool acepta opcionalmente `outputFileName`; si no se indica, escribe `ETP.xlsx` dentro de `evidence.output`. Funciona si solo existen tests REST, solo E2E o ambos. No ejecuta los tests durante la exportación: refleja los resultados persistidos que estén disponibles. Si no encuentra ningún `@Test`, `it()` o `test()`, devuelve un error claro en vez de crear un ETP vacío.
 
 Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio) y es **UI-first**: los RF/CU describen **lo que el usuario puede reproducir DESDE LA UI**, no la API completa.
 - **Con `frontend.root` configurado (modo UI-first):** los **RF** se derivan de lo que la UI expone (rutas de `appRouting`, componentes/pantallas y acciones que el usuario puede disparar) y los **CU** son los flujos concretos ejercitables desde la interfaz. OpenAPI se usa **solo como referencia** para entender el comportamiento, **no** como checklist de cobertura: no se crea un RF por endpoint ni se prueban casos que la UI no permite. La cobertura exhaustiva de la API es tarea de `generateRestTests`.

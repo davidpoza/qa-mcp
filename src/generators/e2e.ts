@@ -162,6 +162,10 @@ function endpointPathFromMethodPath(methodPath: string): string {
   return match ? match[1].trim() : methodPath.trim();
 }
 
+function splitMethodPaths(methodPath: string): string[] {
+  return methodPath.split(/\s*;\s*/).map((value) => value.trim()).filter(Boolean);
+}
+
 /**
  * Deriva un patrón glob de intercept a partir de un path OpenAPI:
  * los parámetros `{x}` se sustituyen por `*` y se antepone `**` para
@@ -370,10 +374,12 @@ function buildBroadFrontendBundle(sources: FrontendSource[], maxTotalChars = 900
 function rfCorrelationTokens(entry: RfEntry): string[] {
   const stop = new Set(["get", "post", "put", "delete", "list", "find", "byid", "with"]);
   const tokens = new Set<string>();
-  const endpointPath = endpointPathFromMethodPath(entry.methodPath);
-  for (const seg of endpointPath.split("/")) {
-    const s = seg.replace(/[{}]/g, "").toLowerCase();
-    if (s.length >= 4 && !/^\d+$/.test(s)) tokens.add(s);
+  for (const methodPath of splitMethodPaths(entry.methodPath)) {
+    const endpointPath = endpointPathFromMethodPath(methodPath);
+    for (const seg of endpointPath.split("/")) {
+      const s = seg.replace(/[{}]/g, "").toLowerCase();
+      if (s.length >= 4 && !/^\d+$/.test(s)) tokens.add(s);
+    }
   }
   for (const raw of entry.operationId.split(/[-_\s]|(?=[A-Z])/)) {
     const s = raw.trim().toLowerCase();
@@ -513,15 +519,20 @@ function buildE2EGenerationPrompt(params: {
   frontendIsFileList?: boolean;
 }): string {
   const { entry, rules, frontendContext, visitUrl, openApiContext, promptOverride, fix, frontendIsFileList } = params;
-  const method = entry.methodPath.split(/\s+/)[0] ?? "GET";
-  const endpointPath = endpointPathFromMethodPath(entry.methodPath);
-  const glob = interceptGlobFromPath(endpointPath);
+  const methodPaths = splitMethodPaths(entry.methodPath);
+  const operationIds = entry.operationId.split(/\s*;\s*/);
   const isUiOnly =
     /acción de UI|sin endpoint directo/i.test(entry.methodPath) ||
     /^ui-/i.test(entry.operationId);
   const endpointLine = isUiOnly
     ? `- Acción de UI SIN endpoint directo (${entry.operationId}). NO asumas una petición de API concreta: verifica el efecto OBSERVABLE en la UI (descarga/exportación, cálculo o validación en cliente, navegación, cambios de estado). Usa \`cy.intercept\` SOLO si al inspeccionar el código descubres una llamada real involucrada.`
-    : `- Endpoint asociado: \`${entry.methodPath}\` (operationId: \`${entry.operationId}\`).\n- Patrón de intercept sugerido: \`cy.intercept("${method}", "${glob}")\` (agnóstico al host).`;
+    : methodPaths
+        .map((methodPath, index) => {
+          const method = methodPath.split(/\s+/)[0] ?? "GET";
+          const glob = interceptGlobFromPath(endpointPathFromMethodPath(methodPath));
+          return `- Endpoint asociado: \`${methodPath}\` (operationId: \`${operationIds[index] ?? "sin-operation-id"}\`).\n  Patrón de intercept sugerido: \`cy.intercept("${method}", "${glob}")\` (agnóstico al host).`;
+        })
+        .join("\n");
 
   return [
     fix

@@ -14,7 +14,8 @@ function normalizeLine(line: string): string {
 }
 
 function rfHeaderRegex(): RegExp {
-  return /^\d+\.\s+\*\*(RF-\d+)\s+—\s+(.+)\*\*\s+\(`([^`]+)`,\s*`([^`]+)`\)\./;
+  // Acepta uno o varios pares endpoint/operationId separados por `;`.
+  return /^\d+\.\s+\*\*(RF-\d+)\s+—\s+(.+)\*\*\s+\((.+)\)\.\s*$/;
 }
 
 function cuRegex(): RegExp {
@@ -38,7 +39,10 @@ export function parseRfCu(content: string): RfEntry[] {
   for (const line of lines) {
     const rfMatch = line.match(rfHeaderRegex());
     if (rfMatch) {
-      const [, id, name, methodPath, operationId] = rfMatch;
+      const [, id, name, endpointBlock] = rfMatch;
+      const quotedValues = [...endpointBlock.matchAll(/`([^`]+)`/g)].map((match) => match[1].trim());
+      const methodPath = quotedValues.filter((_, index) => index % 2 === 0).join("; ") || endpointBlock.trim();
+      const operationId = quotedValues.filter((_, index) => index % 2 === 1).join("; ") || "sin-operation-id";
       currentRf = { id, name, methodPath, operationId, cases: [] };
       rfEntries.push(currentRf);
       currentCuIndex = -1;

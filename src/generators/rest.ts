@@ -28,6 +28,7 @@ function openApiSnippet(content: string): string {
 
 function buildJavaTest(entry: RfEntry, openApiContext: string): string {
   const className = `${javaClassName(entry.name)}ApiTest`;
+  const primaryMethodPath = entry.methodPath.split(/\s*;\s*/)[0] ?? entry.methodPath;
   const methods = entry.cases
     .map((cu, index) => {
       const methodName = `${javaMethodName(cu.name)}_${index + 1}`;
@@ -38,7 +39,7 @@ function buildJavaTest(entry: RfEntry, openApiContext: string): string {
         `        given()`,
         `            .log().all()`,
         "        .when()",
-        `            .request("${entry.methodPath}")`,
+        `            .request("${primaryMethodPath}")`,
         "        .then()",
         "            .log().all();",
         "    }",
