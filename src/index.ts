@@ -375,7 +375,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Herramienta AUTÓNOMA y reanudable: obtiene los RF/CU de rf-cu.md o los deriva de OpenAPI, consulta .qa-mcp-e2e-status.json, omite los CU que ya tienen spec y green: true, genera los specs que faltan y ejecuta/repara los existentes que no están en verde. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Sin MCP sampling (modo asistido), su propia respuesta incorpora el MANDATO que el agente cliente debe seguir: generar/escribir el CU indicado, llamar a runE2ETests, corregir hasta verde y volver a generateE2ETests para el siguiente CU, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. El usuario solo necesita invocar generateE2ETests una vez; el agente debe encadenar las siguientes llamadas. El progreso se guarda EN DISCO y es reanudable.",
+  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Cada acción de rf-cu.md incorpora una llamada cy.screenshot con nombre rfx_cuy_NN y su PNG se persiste en evidence.output/screenshots para exportETPAsWord. Herramienta AUTÓNOMA y reanudable: consulta .qa-mcp-e2e-status.json y sólo omite un CU si tiene spec, green: true, todas las llamadas de captura y todos los PNG; genera/repara o vuelve a ejecutar cualquier CU incompleto. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Sin MCP sampling (modo asistido), su propia respuesta incorpora el MANDATO que el agente cliente debe seguir: generar/escribir el CU indicado, llamar a runE2ETests, corregir hasta verde y volver a generateE2ETests para el siguiente CU, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. El usuario solo necesita invocar generateE2ETests una vez; el agente debe encadenar las siguientes llamadas. El progreso se guarda EN DISCO y es reanudable.",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),
@@ -410,7 +410,7 @@ registerToolCompat(
 
     if (result.skippedGreenCount > 0) {
       lines.push(
-        `Omitidos ${result.skippedGreenCount} CU que ya tenían spec y green: true en .qa-mcp-e2e-status.json.`
+        `Omitidos ${result.skippedGreenCount} CU completos (spec, green: true y una captura PNG por acción).`
       );
     }
 
@@ -466,7 +466,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "exportETPAsExcel",
-  "Genera un ETP Excel con la misma estructura y estilos de evidence.excelTemplate (evidences.xlsx). Sustituye las filas de ejemplo de la plantilla por una fila para CADA método @Test Rest Assured y cada it()/test() Cypress encontrado en los directorios configurados, relacionándolos con RF/CU y reflejando el estado green/log de E2E cuando existe. No se limita a listar ficheros.",
+  "Genera un ETP Excel con la misma estructura y estilos de evidence.excelTemplate (evidences.xlsx). Sustituye las filas de ejemplo de la plantilla por una fila para CADA método @Test Rest Assured y cada it()/test() Cypress encontrado, mostrando primero todos los REST y después todos los E2E; dentro de cada bloque ordena por R. Funcional y Nombre/CU. Relaciona los tests con RF/CU y refleja el estado green/log de E2E cuando existe. No se limita a listar ficheros.",
   {
     outputFileName: z.string().optional(),
   },
@@ -480,7 +480,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "exportETPAsWord",
-  "Exporta el ETP a Word usando docx.",
+  "Genera un ETP Word desde rf-cu.md, con un encabezado por RF, un subencabezado por CU y cada acción seguida de su captura PNG de Cypress. Exige que todos los CU estén en verde y que exista una evidencia por acción; si falta alguna, devuelve un error en vez de crear un documento incompleto.",
   {
     outputFileName: z.string().optional(),
   },

@@ -50,6 +50,12 @@ Reglas obligatorias de implementación:
 - Código limpio, sin duplicación, extrayendo helpers.
 - No introducir utilidades nuevas si ya existe helper equivalente.
 
+8) Evidencias por acción (CRÍTICO)
+- Después de completar y verificar cada acción numerada del CU, llamar a `cy.screenshot()` con el nombre exacto indicado por el prompt de generación.
+- Generar una captura por cada acción, en el mismo orden, cuando el estado visual de esa acción ya sea estable.
+- Usar `{ capture: "viewport", overwrite: true }` y no añadir extensión: Cypress genera el PNG.
+- No agrupar las capturas al final del test ni eliminar estas llamadas durante una corrección.
+
 Entrega esperada:
 - Archivo .cy.js/.cy.ts listo para ejecutar.
 - Nuevos casos alineados con RF/CU definidos en rf-cu.md.

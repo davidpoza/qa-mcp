@@ -4,6 +4,13 @@ import { LoadedContext, RfEntry, CuCase } from "../types";
 import { requireFrontendRoot } from "../config";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
+import {
+  actionScreenshots,
+  clearScreenshotEvidence,
+  hasAllScreenshotEvidence,
+  missingScreenshotCalls,
+  persistScreenshotEvidence,
+} from "../evidence-screenshots";
 import { runCypressSpec, extractCypressFailureSummary, isCypressCacheError, repairCypressCache, CypressRunResult } from "./cypress-runner";
 
 function slug(value: string): string {
@@ -502,6 +509,18 @@ function formatCasesForPrompt(entry: RfEntry): string {
     .join("\n");
 }
 
+function formatScreenshotContract(entry: RfEntry): string {
+  return entry.cases
+    .flatMap((cu) =>
+      actionScreenshots(entry, cu).map(
+        (screenshot) =>
+          `- Acción ${screenshot.actionIndex + 1} (${screenshot.action}): ` +
+          `\`cy.screenshot("${screenshot.baseName}", { capture: "viewport", overwrite: true });\``
+      )
+    )
+    .join("\n");
+}
+
 /**
  * Construye el prompt que se envía al LLM del cliente (vía sampling) para
  * generar un spec Cypress REAL (con cy.intercept, interacción y aserciones)
@@ -551,6 +570,9 @@ function buildE2EGenerationPrompt(params: {
     "- Reutiliza los helpers compartidos importándolos de `../support/e2e-helpers` (NO reimplementes utilidades):",
     helperApiSummary(),
     "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un ÚNICO `it` para el CU de ESTE fichero (cada CU vive en su propio spec; NO añadas otros CU ni `it` adicionales). Nombre del `it`: `\"<CU-id> <nombre>\"`, en español.",
+    "- **EVIDENCIAS POR ACCIÓN (OBLIGATORIO)**: inmediatamente DESPUÉS de completar y verificar cada acción numerada del CU, añade su llamada exacta a `cy.screenshot`. Debe existir UNA captura por acción, en el mismo orden; no las agrupes al final ni captures antes de que la acción sea visible y estable. No añadas extensión: Cypress genera el `.png` nativo. Usa siempre `{ capture: \"viewport\", overwrite: true }`.",
+    "- Nombres exactos de las capturas requeridas para este CU:",
+    formatScreenshotContract(entry),
     "- **REGLA CRÍTICA DE SELECTORES**: usa ÚNICAMENTE selectores que aparezcan LITERALMENTE en el código frontend proporcionado (busca `id=\"...\"`, `formcontrolname=\"...\"`, tags de componentes `app-*`/`empresas-ui-*`, clases CSS, `data-*`, y textos exactos de botones). PROHIBIDO inventar selectores a partir del `operationId` o de nombres en inglés del OpenAPI. Si el endpoint es `get-salesOrganizations` pero en el HTML el control es `id=\"sociedad\"`, DEBES usar `#sociedad`, nunca `[formcontrolname='salesOrganization']`.",
     "- Antes de escribir cada selector, localízalo en el bloque de código frontend. Si un campo/desplegable no existe con ese nombre, busca el equivalente real (a menudo en español) en las plantillas.",
     "- **CONTROLES CUSTOM (MUY IMPORTANTE)**: muchos controles son web components que envuelven un elemento nativo (p. ej. `<empresas-ui-dropdown id=\"sociedad\">` contiene un `<select>` nativo, `<empresas-ui-input>` contiene un `<input>`). NUNCA llames `.select()` ni `.find('option')` directamente sobre el wrapper custom: fallará (`cy.select() can only be called on a <select>`). En su lugar:",
@@ -618,6 +640,7 @@ function buildE2EGenerationPrompt(params: {
           "- Corrige la causa REAL del fallo aplicando TODAS las reglas de arriba (selectores literales del código, controles custom, valores sintéticos `[ngValue]`, esperar opciones asíncronas con `waitForSelectableOptions`, CU de error = acción mínima + `cy.url().should('include','/error')` + PARAR, no afirmar recuentos exactos de opciones, no tocar controles no afectados, etc.).",
           "- Si un `it()` YA pasaba, NO cambies su lógica salvo que sea imprescindible; céntrate en los que fallan.",
           "- No elimines Casos de Uso ni los conviertas en `it.skip`. Todos deben quedar ejecutables y en verde.",
+          "- Conserva o restaura TODAS las llamadas `cy.screenshot` obligatorias, cada una inmediatamente después de su acción correspondiente.",
         ].join("\n")
       : "",
     "",
@@ -1177,6 +1200,8 @@ function buildDefaultCypressConfigFileWithBaseUrl(baseUrl?: string): string {
     "      registerBaselineTasks(on);",
     "    }",
     "  },",
+    "  screenshotsFolder: \"cypress/screenshots\",",
+    "  screenshotOnRunFailure: true,",
     "  video: false",
     "});",
     "",
@@ -1328,6 +1353,51 @@ export interface GenerateE2EOptions {
   runTimeoutMs?: number;
 }
 
+interface CuArtifactState {
+  spec?: string;
+  missingCalls: ReturnType<typeof missingScreenshotCalls>;
+  evidenceReady: boolean;
+  complete: boolean;
+}
+
+async function inspectCuArtifacts(
+  context: LoadedContext,
+  unit: CuUnit,
+  status: Record<string, E2EStatusEntry>,
+  fullPath: string
+): Promise<CuArtifactState> {
+  const spec = await readTextIfExists(fullPath);
+  const missingCalls = spec ? missingScreenshotCalls(spec, unit.rf, unit.cu) : actionScreenshots(unit.rf, unit.cu);
+  const evidenceReady = spec
+    ? await hasAllScreenshotEvidence(context, unit.rf, unit.cu)
+    : false;
+  return {
+    spec,
+    missingCalls,
+    evidenceReady,
+    complete:
+      Boolean(spec) &&
+      isRfGreen(status, unit.unitId) &&
+      missingCalls.length === 0 &&
+      evidenceReady,
+  };
+}
+
+function screenshotContractError(unit: CuUnit, spec: string): string | undefined {
+  const missing = missingScreenshotCalls(spec, unit.rf, unit.cu);
+  if (missing.length === 0) return undefined;
+  return (
+    `CONTRATO DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: faltan las llamadas ` +
+    missing.map((item) => `cy.screenshot(\"${item.baseName}\", ...)`).join(", ") +
+    ". Debe haber una captura inmediatamente después de cada acción de rf-cu.md."
+  );
+}
+
+function requireScreenshotContract(unit: CuUnit, spec: string): void {
+  const error = screenshotContractError(unit, spec);
+  if (error) throw new Error(error);
+}
+
 export async function generateE2ETests(
   context: LoadedContext,
   sample: E2ESampleFn,
@@ -1378,16 +1448,16 @@ export async function generateE2ETests(
   const targets = await Promise.all(
     units.map(async (unit) => {
       const fullPath = path.join(outputRoot, `${unit.fileBase}.cy.js`);
+      const artifacts = await inspectCuArtifacts(context, unit, initialStatus, fullPath);
       return {
         unit,
         fullPath,
-        exists: await fileExists(fullPath),
+        exists: Boolean(artifacts.spec),
+        ...artifacts,
       };
     })
   );
-  const pendingTargets = targets.filter(
-    (target) => !(target.exists && isRfGreen(initialStatus, target.unit.unitId))
-  );
+  const pendingTargets = targets.filter((target) => !target.complete);
   const skippedGreenCount = targets.length - pendingTargets.length;
   const sources = pendingTargets.length > 0 ? await readFrontendSources(frontendRoot) : [];
 
@@ -1400,12 +1470,12 @@ export async function generateE2ETests(
     const promptData = await loadE2EPrompt(context, entry, undefined, promptOverride);
     const frontendContext = buildRfFocusedBundle(sources, entry);
 
-    if (!target.exists) {
-      // Un estado verde sin fichero es inconsistente: el CU vuelve a estar pendiente.
-      if (isRfGreen(initialStatus, unit.unitId)) {
-        await setRfGreen(outputRoot, unit.unitId, false);
-      }
+    // Un verde sin spec, sin llamadas o sin PNG persistidos es inconsistente.
+    if (isRfGreen(initialStatus, unit.unitId)) {
+      await setRfGreen(outputRoot, unit.unitId, false);
+    }
 
+    if (!target.exists || target.missingCalls.length > 0) {
       const generationPrompt = buildE2EGenerationPrompt({
         entry,
         rules: promptData.text,
@@ -1413,6 +1483,15 @@ export async function generateE2ETests(
         visitUrl,
         openApiContext,
         promptOverride,
+        fix: target.spec
+          ? {
+              currentSpec: target.spec,
+              cypressOutput:
+                screenshotContractError(unit, target.spec) ??
+                "El spec debe incorporar una evidencia PNG por cada acción.",
+              attempt: 0,
+            }
+          : undefined,
       });
 
       const generated = await sample(generationPrompt, 16000);
@@ -1423,7 +1502,9 @@ export async function generateE2ETests(
         );
       }
 
-      await fs.writeFile(fullPath, sanitizeGeneratedSpec(generated), "utf8");
+      const sanitized = sanitizeGeneratedSpec(generated);
+      requireScreenshotContract(unit, sanitized);
+      await fs.writeFile(fullPath, sanitized, "utf8");
       files.push(fullPath);
     }
 
@@ -1444,7 +1525,9 @@ export async function generateE2ETests(
     for (let attempt = 1; attempt <= maxIterations; attempt++) {
       attempts = attempt;
       await clearBaselineForCu(frontendRoot, unit.unitId);
+      await clearScreenshotEvidence(context, unit.rf, unit.cu);
 
+      const runStartedAt = Date.now();
       const run = await runCypressSpecWithRepair({
         frontendRoot,
         specRelPath,
@@ -1455,19 +1538,40 @@ export async function generateE2ETests(
       lastOutput = run.output;
 
       if (run.passed) {
-        passed = true;
-        await setRfGreen(outputRoot, unit.unitId, true);
-        await writeRfFeedbackLog({
-          outputRoot,
-          entry,
-          cu: unit.cu,
-          specFileName: fileName,
-          specPath: fullPath,
-          runCommand,
-          passed: true,
-          rawOutput: run.output,
-        });
-        break;
+        try {
+          await persistScreenshotEvidence(context, frontendRoot, unit.rf, unit.cu, runStartedAt);
+          passed = true;
+          await setRfGreen(outputRoot, unit.unitId, true);
+          await writeRfFeedbackLog({
+            outputRoot,
+            entry,
+            cu: unit.cu,
+            specFileName: fileName,
+            specPath: fullPath,
+            runCommand,
+            passed: true,
+            rawOutput: run.output,
+          });
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          lastOutput = `${run.output}\n\n[qa-mcp] ${message}`;
+          await setRfGreen(outputRoot, unit.unitId, false);
+          if (attempt >= maxIterations) {
+            await writeRfFeedbackLog({
+              outputRoot,
+              entry,
+              cu: unit.cu,
+              specFileName: fileName,
+              specPath: fullPath,
+              runCommand,
+              passed: false,
+              rawOutput: lastOutput,
+              injectedOutput: message,
+            });
+          }
+          continue;
+        }
       }
 
       await setRfGreen(outputRoot, unit.unitId, false);
@@ -1533,7 +1637,9 @@ export async function generateE2ETests(
 
       const fixed = await sample(fixPrompt, 16000);
       if (fixed && fixed.trim().length > 0) {
-        await fs.writeFile(fullPath, sanitizeGeneratedSpec(fixed), "utf8");
+        const sanitized = sanitizeGeneratedSpec(fixed);
+        requireScreenshotContract(unit, sanitized);
+        await fs.writeFile(fullPath, sanitized, "utf8");
         if (!files.includes(fullPath)) {
           files.push(fullPath);
         }
@@ -1550,7 +1656,13 @@ export async function generateE2ETests(
   }
 
   const finalStatus = await readE2EStatus(outputRoot);
-  const greenCount = units.filter((unit) => isRfGreen(finalStatus, unit.unitId)).length;
+  const finalArtifacts = await Promise.all(
+    units.map(async (unit) => {
+      const fullPath = path.join(outputRoot, `${unit.fileBase}.cy.js`);
+      return inspectCuArtifacts(context, unit, finalStatus, fullPath);
+    })
+  );
+  const greenCount = finalArtifacts.filter((artifacts) => artifacts.complete).length;
   return {
     files,
     rfCount: units.length,
@@ -1594,15 +1706,6 @@ export interface E2EFallbackResult {
   nextAction: "generate" | "run" | "done";
   /** RF en curso (el primero no verde), para los mensajes de los modos `run`/`generate`. */
   current?: { rf: string; name: string; filePath: string; specRelPath: string };
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Ruta del fichero de estado (qué RF están en verde) dentro del dir de specs. */
@@ -1702,17 +1805,24 @@ export async function prepareE2EFallback(
       const fileName = `${unit.fileBase}.cy.js`;
       const fullPath = path.join(outputRoot, fileName);
       const specRelPath = path.relative(frontendRoot, fullPath).split(path.sep).join("/");
-      const exists = await fileExists(fullPath);
+      const artifacts = await inspectCuArtifacts(context, unit, status, fullPath);
       return {
         unit,
         entry,
         fullPath,
         specRelPath,
-        exists,
-        green: exists && isRfGreen(status, unit.unitId),
+        exists: Boolean(artifacts.spec),
+        ...artifacts,
+        green: artifacts.complete,
       };
     })
   );
+
+  for (const target of targets) {
+    if (isRfGreen(status, target.unit.unitId) && !target.complete) {
+      await setRfGreen(outputRoot, target.unit.unitId, false);
+    }
+  }
 
   const greenCount = targets.filter((t) => t.green).length;
 
@@ -1743,8 +1853,8 @@ export async function prepareE2EFallback(
       specRelPath: current.specRelPath,
     };
 
-    if (current.exists) {
-      // Ya generado pero no verde: no regenerar; el siguiente paso es ejecutarlo.
+    if (current.exists && current.missingCalls.length === 0) {
+      // Spec completo pero no verde/sin PNG persistidos: el siguiente paso es ejecutarlo.
       return {
         specs: [],
         runCommand,
@@ -1771,6 +1881,15 @@ export async function prepareE2EFallback(
       openApiContext,
       promptOverride,
       frontendIsFileList: leanFrontend,
+      fix: current.spec
+        ? {
+            currentSpec: current.spec,
+            cypressOutput:
+              screenshotContractError(current.unit, current.spec) ??
+              "El spec debe incorporar una evidencia PNG por cada acción.",
+            attempt: 0,
+          }
+        : undefined,
     });
 
     return {
@@ -1794,11 +1913,11 @@ export async function prepareE2EFallback(
     };
   }
 
-  const pending = targets.filter((t) => !t.exists);
+  const pending = targets.filter((t) => !t.exists || t.missingCalls.length > 0);
   const pendingCount = pending.length;
   const allGenerated = pendingCount === 0;
 
-  const toEmit = oneAtATime ? pending.slice(0, 1) : targets;
+  const toEmit = oneAtATime ? pending.slice(0, 1) : pending;
   const sources = toEmit.length > 0 ? await readFrontendSources(frontendRoot) : [];
 
   const specs: E2EFallbackSpec[] = [];
@@ -1816,6 +1935,15 @@ export async function prepareE2EFallback(
       openApiContext,
       promptOverride,
       frontendIsFileList: leanFrontend,
+      fix: target.spec
+        ? {
+            currentSpec: target.spec,
+            cypressOutput:
+              screenshotContractError(target.unit, target.spec) ??
+              "El spec debe incorporar una evidencia PNG por cada acción.",
+            attempt: 0,
+          }
+        : undefined,
     });
 
     specs.push({
@@ -1981,7 +2109,13 @@ export async function runE2EFallback(
   const scopeCount = expandToCuUnits(entries).length;
   const status = await readE2EStatus(outputRoot);
   let units = expandToCuUnits(entries);
-  const priorGreen = units.filter((u) => isRfGreen(status, u.unitId)).length;
+  const artifactStates = await Promise.all(
+    units.map(async (unit) => {
+      const fullPath = path.join(outputRoot, `${unit.fileBase}.cy.js`);
+      return { unit, artifacts: await inspectCuArtifacts(context, unit, status, fullPath) };
+    })
+  );
+  const priorGreen = artifactStates.filter((state) => state.artifacts.complete).length;
   const rt = resolveE2ERuntime(context);
   const diag = {
     configPath: context.configPath,
@@ -1992,7 +2126,7 @@ export async function runE2EFallback(
   // Modo CU-a-CU-hasta-verde: ejecuta SOLO el CU en curso (el primero no verde,
   // o el indicado por rfFilter), para acotar la salida y el contexto del cliente.
   if (untilGreen) {
-    const target = units.find((u) => !isRfGreen(status, u.unitId));
+    const target = artifactStates.find((state) => !state.artifacts.complete)?.unit;
     if (!target) {
       return {
         results: [],
@@ -2006,6 +2140,10 @@ export async function runE2EFallback(
       };
     }
     units = [target];
+  } else {
+    units = artifactStates
+      .filter((state) => !state.artifacts.complete)
+      .map((state) => state.unit);
   }
 
   interface Failure {
@@ -2044,7 +2182,35 @@ export async function runE2EFallback(
       continue;
     }
 
+    const contractError = screenshotContractError(unit, currentSpec);
+    if (contractError) {
+      await setRfGreen(outputRoot, unit.unitId, false);
+      await clearScreenshotEvidence(context, unit.rf, unit.cu);
+      const result: E2ERunFixResult = {
+        rf: cuRf,
+        name: cuName,
+        filePath: fullPath,
+        specRelPath,
+        passed: false,
+        missing: false,
+        output: contractError,
+      };
+      results.push(result);
+      failures.push({
+        result,
+        unit,
+        entry,
+        currentSpec,
+        rawOutput: contractError,
+        fileName,
+        fullPath,
+      });
+      continue;
+    }
+
     await clearBaselineForCu(frontendRoot, unit.unitId);
+    await clearScreenshotEvidence(context, unit.rf, unit.cu);
+    const runStartedAt = Date.now();
     const run = await runCypressSpecWithRepair({
       frontendRoot,
       specRelPath,
@@ -2054,27 +2220,53 @@ export async function runE2EFallback(
     });
 
     if (run.passed) {
-      await setRfGreen(outputRoot, unit.unitId, true);
-      const passResult: E2ERunFixResult = {
-        rf: cuRf,
-        name: cuName,
-        filePath: fullPath,
-        specRelPath,
-        passed: true,
-        missing: false,
-      };
-      passResult.logPath = await writeRfFeedbackLog({
-        outputRoot,
-        entry,
-        cu: unit.cu,
-        specFileName: fileName,
-        specPath: fullPath,
-        runCommand,
-        passed: true,
-        rawOutput: run.output,
-      });
-      results.push(passResult);
-      continue;
+      try {
+        await persistScreenshotEvidence(context, frontendRoot, unit.rf, unit.cu, runStartedAt);
+        await setRfGreen(outputRoot, unit.unitId, true);
+        const passResult: E2ERunFixResult = {
+          rf: cuRf,
+          name: cuName,
+          filePath: fullPath,
+          specRelPath,
+          passed: true,
+          missing: false,
+        };
+        passResult.logPath = await writeRfFeedbackLog({
+          outputRoot,
+          entry,
+          cu: unit.cu,
+          specFileName: fileName,
+          specPath: fullPath,
+          runCommand,
+          passed: true,
+          rawOutput: run.output,
+        });
+        results.push(passResult);
+        continue;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await setRfGreen(outputRoot, unit.unitId, false);
+        const result: E2ERunFixResult = {
+          rf: cuRf,
+          name: cuName,
+          filePath: fullPath,
+          specRelPath,
+          passed: false,
+          missing: false,
+          output: message,
+        };
+        results.push(result);
+        failures.push({
+          result,
+          unit,
+          entry,
+          currentSpec,
+          rawOutput: `${run.output}\n\n[qa-mcp] ${message}`,
+          fileName,
+          fullPath,
+        });
+        continue;
+      }
     }
 
     await setRfGreen(outputRoot, unit.unitId, false);
@@ -2179,7 +2371,13 @@ export async function runE2EFallback(
       rfFilter && rfFilter.length > 0
         ? allUnits.filter((u) => rfFilter.map((id) => id.toLowerCase()).includes(u.rf.id.toLowerCase()))
         : allUnits;
-    const greenCount = scopeUnits.filter((u) => isRfGreen(status2, u.unitId)).length;
+    const completedStates = await Promise.all(
+      scopeUnits.map(async (unit) => {
+        const fullPath = path.join(outputRoot, `${unit.fileBase}.cy.js`);
+        return inspectCuArtifacts(context, unit, status2, fullPath);
+      })
+    );
+    const greenCount = completedStates.filter((state) => state.complete).length;
     const single = results[0];
     let nextAction: E2ERunFallbackResult["nextAction"];
     if (single?.missing) {

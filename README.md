@@ -78,7 +78,7 @@ En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `gene
 - `maxIterations` (número, por defecto `3`): intentos máximos por CU (1 generación + N-1 correcciones).
 - `rfFilter` (array de ids, opcional): limita a ciertos RF, p. ej. `["RF-01","RF-03"]`.
 - `promptOverride` (string, opcional).
-Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe acumulado y un extracto de la salida de Cypress para los CU que siguen fallando.
+Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). Cada acción definida en `rf-cu.md` genera además una captura explícita con `cy.screenshot()`: `rf1_cu1_01.png`, `rf1_cu1_02.png`, etc. El número de acción siempre usa dos dígitos. Cypress crea el PNG nativo y la tool lo copia a `evidence.output/screenshots`, una ubicación estable que no se borra al ejecutar el siguiente spec. Un CU sólo se considera completamente verde cuando el spec contiene todas las llamadas y existen todas sus capturas; por eso los CU verdes antiguos sin estas evidencias vuelven automáticamente al bucle. El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe acumulado y un extracto de la salida de Cypress para los CU que siguen fallando.
 
 ## Exportación del ETP a Excel
 
@@ -87,12 +87,18 @@ Entre cada intento se limpian las claves de baseline del CU en curso para que la
 - una fila `REST-NNN` por cada método Java anotado con `@Test` encontrado bajo `restTests`;
 - una fila `E2E-NNN` por cada `it()` o `test()` encontrado en los `.cy.js` bajo `e2eTests`;
 - RF, CU, objetivo y acciones se obtienen de `rf-cu.md` cuando el test puede relacionarse con él;
-- las filas se ordenan por `R. Funcional` y, dentro de cada requisito, por `Nombre` (CU), usando orden natural para los identificadores numéricos;
+- las filas muestran primero todos los casos `REST` y después todos los `E2E`; dentro de cada bloque se ordenan por `R. Funcional` y luego por `Nombre` (CU), usando orden natural para los identificadores numéricos;
 - los E2E usan `.qa-mcp-e2e-status.json` y su `.log` para mostrar `OK`, `KO`, `PASS` o `FAIL`;
 - los Rest Assured se muestran como `NO EJECUTADO` porque `generateRestTests` genera el código, pero no lo ejecuta ni persiste resultados;
 - `it.skip` y `@Disabled` se muestran como `OMITIDO`.
 
 La tool acepta opcionalmente `outputFileName`; si no se indica, escribe `ETP.xlsx` dentro de `evidence.output`. Funciona si solo existen tests REST, solo E2E o ambos. No ejecuta los tests durante la exportación: refleja los resultados persistidos que estén disponibles. Si no encuentra ningún `@Test`, `it()` o `test()`, devuelve un error claro en vez de crear un ETP vacío.
+
+## Exportación del ETP a Word
+
+`exportETPAsWord` construye el documento a partir de `rf-cu.md`: crea un encabezado de nivel 1 por cada RF y, dentro de él, un encabezado de nivel 2 por cada CU. Para cada acción incluye el texto definido en `rf-cu.md` y su captura PNG (`rfx_cuy_NN.png`). Los RF, CU y acciones siguen orden natural.
+
+El Word sólo se exporta si todos los CU están en verde y existe una captura PNG válida por cada acción. Si falta alguna evidencia, la tool devuelve un error con los CU y ficheros pendientes en vez de generar un documento incompleto. Ejecuta antes `generateE2ETests` hasta completar el conjunto.
 
 Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio) y es **UI-first**: los RF/CU describen **lo que el usuario puede reproducir DESDE LA UI**, no la API completa.
 - **Con `frontend.root` configurado (modo UI-first):** los **RF** se derivan de lo que la UI expone (rutas de `appRouting`, componentes/pantallas y acciones que el usuario puede disparar) y los **CU** son los flujos concretos ejercitables desde la interfaz. OpenAPI se usa **solo como referencia** para entender el comportamiento, **no** como checklist de cobertura: no se crea un RF por endpoint ni se prueban casos que la UI no permite. La cobertura exhaustiva de la API es tarea de `generateRestTests`.

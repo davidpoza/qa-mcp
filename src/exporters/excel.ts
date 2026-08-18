@@ -84,6 +84,8 @@ function functionalRequirement(test: EvidenceTestCase): string {
 const evidenceOrder = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
 
 function compareEvidenceTests(left: EvidenceTestCase, right: EvidenceTestCase): number {
+  if (left.kind !== right.kind) return left.kind === "REST" ? -1 : 1;
+
   const requirementOrder = evidenceOrder.compare(
     functionalRequirement(left),
     functionalRequirement(right)
