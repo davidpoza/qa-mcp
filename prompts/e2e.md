@@ -7,10 +7,11 @@ Objetivo:
 Reglas obligatorias de implementación:
 1) Estructura base
 - Mantén constantes para URL y selectores reutilizables.
-- Crea helpers reutilizables para:
+- Reutiliza los helpers compartidos de `cypress/support/e2e-helpers.js` para:
   - Buscar/seleccionar opciones de <select> por texto o value.
-  - Rellenar inputs numéricos disparando eventos de Angular.
+  - Rellenar inputs numéricos con eventos de la ventana de la aplicación.
   - Cerrar overlays/cookies conocidos.
+- No declares copias locales de esos helpers dentro del spec.
 
 2) Interacción con selects (CRÍTICO)
 - Usar patrón de búsqueda de opción por texto/value (case-insensitive).
@@ -19,14 +20,9 @@ Reglas obligatorias de implementación:
 - Seleccionar por value si existe; si no, por texto visible.
 
 3) Interacción con inputs de texto y numéricos (CRÍTICO)
-- Evitar depender solo de .type() en campos problemáticos.
-- Usar patrón:
-  - click({ force: true })
-  - invoke('val', valor)
-  - trigger('input', { force: true })
-  - trigger('change', { force: true })
-  - assert final: should('have.value', valor)
-- Para horas/minutos usar clear/type con force cuando aplique.
+- Usar exclusivamente `setInputValue`, `setNumericFieldValue` o `setValueByFormControl`; resuelven el input nativo, usan su setter `value` y emiten `input`/`change` construidos por la ventana de la aplicación (`input.ownerDocument.defaultView.Event`).
+- PROHIBIDO reimplementar helpers locales de escritura o usar directamente `clear()`, `type()`, `invoke('val')` o `trigger('input'/'change')`: Cypress puede emitir eventos desde otra ventana, fallar `instanceof Event` en el componente Angular y guardar `[object Event]` como valor.
+- Los helpers registran automáticamente cada input manipulado. `persistOrAssertBaseline` incorpora esos valores bajo `inputs`, aunque el spec no los haya añadido manualmente al snapshot.
 
 4) Selectores
 - **Deriva los selectores del código frontend proporcionado** (ids, atributos `data-*`, `formControlName`, `name`, textos de opciones/botones). No inventes selectores que no aparezcan en el código.

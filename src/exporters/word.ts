@@ -10,17 +10,13 @@ import {
   TextRun,
 } from "docx";
 import { actionScreenshots, screenshotEvidenceDirectory } from "../evidence-screenshots";
+import { E2EStatusLike, isCurrentGreenE2EStatus } from "../e2e-contract";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { CuCase, LoadedContext, RfEntry } from "../types";
 
-interface E2EStatusEntry {
-  green?: unknown;
-  at?: unknown;
-}
-
 const naturalOrder = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
 
-async function readE2EStatus(context: LoadedContext): Promise<Record<string, E2EStatusEntry>> {
+async function readE2EStatus(context: LoadedContext): Promise<Record<string, E2EStatusLike>> {
   const configRoot = path.dirname(context.configPath);
   const statusPath = path.resolve(
     configRoot,
@@ -30,7 +26,7 @@ async function readE2EStatus(context: LoadedContext): Promise<Record<string, E2E
   try {
     const parsed = JSON.parse(await fs.readFile(statusPath, "utf8")) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, E2EStatusEntry>)
+      ? (parsed as Record<string, E2EStatusLike>)
       : {};
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
@@ -96,7 +92,7 @@ async function loadCompleteEvidence(
   for (const rf of entries) {
     for (const cu of casesForRf(rf)) {
       const unitId = `${rf.id}.${cu.id}`;
-      if (status[unitId.toLowerCase()]?.green !== true) notGreen.push(unitId);
+      if (!isCurrentGreenE2EStatus(status[unitId.toLowerCase()])) notGreen.push(unitId);
 
       for (const screenshot of actionScreenshots(rf, cu)) {
         const imagePath = path.join(directory, screenshot.fileName);

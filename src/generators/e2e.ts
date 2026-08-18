@@ -4,6 +4,7 @@ import { LoadedContext, RfEntry, CuCase } from "../types";
 import { requireFrontendRoot } from "../config";
 import { extractOrBuildRfEntries } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
+import { E2E_CONTRACT_VERSION } from "../e2e-contract";
 import {
   actionScreenshots,
   clearScreenshotEvidence,
@@ -191,7 +192,7 @@ function interceptGlobFromPath(endpointPath: string): string {
  */
 function helperApiSummary(): string {
   return [
-    "- `persistOrAssertBaseline(key, currentSnapshot, options?)`: autocaptura/compara el snapshot en el baseline.",
+    "- `persistOrAssertBaseline(key, currentSnapshot, options?)`: autocaptura/compara el snapshot y rechaza cualquier valor Event/`[object Event]`.",
     "- `normalizeAmount(text)`: convierte importes/textos numéricos (con € y separadores) a número.",
     "- `findMatchingOption($options, textoOValor)`: localiza una <option> por texto o value.",
     "- `resolveNativeSelect(rootSelector)`: resuelve el `<select>` nativo aunque `rootSelector` apunte a un componente contenedor (custom control que envuelve un `<select>`, p. ej. un web component). Devuelve el `<select>` real (vía cy.then).",
@@ -200,7 +201,7 @@ function helperApiSummary(): string {
     "- `selectRequiredOptionByTextOrValue(rootSelector, textoOValor)`: valida que existe y selecciona (resuelve el select nativo internamente).",
     "- `selectOptionByTextOrValueIfPresent(rootSelector, textoOValor)`: selecciona si existe.",
     "- `selectFirstSelectableOption(rootSelector)`: selecciona la primera opción válida.",
-    "- `setInputValue(inputSelector, value)`: rellena un input disparando eventos Angular (input/change).",
+    "- `setInputValue(inputSelector, value)`: escribe mediante el setter nativo del input y emite `input`/`change` creados por la ventana de la aplicación (AUT), evitando eventos cross-realm. Además registra el valor para incluirlo automáticamente en el baseline.",
     "- `setNumericFieldValue(fieldSelector, value)`: igual para campos numéricos (usa `input:not([type=hidden])`).",
     "- `setValueByFormControl(componentSelector, formControlName, value)`: rellena `[formcontrolname=...] input`.",
     "- `assertControlEnabled(rootSelector)`: afirma que un control (nativo O custom `empresas-ui-*`) está HABILITADO. Resuelve el `<input>/<select>/<button>` nativo interno; si es un web component sin nativo interno, comprueba ausencia de `disabled`/`aria-disabled`/clase `disabled`. RECIBE UN SELECTOR STRING (nunca un subject/chainable). ÚSALO SIEMPRE en lugar de `.should('be.enabled')` sobre un wrapper custom (el pseudo `:enabled` NO matchea web components y CUELGA).",
@@ -579,7 +580,8 @@ function buildE2EGenerationPrompt(params: {
     "   - Para desplegables usa SIEMPRE los helpers pasando el selector del contenedor (`selectFirstSelectableOption('#sociedad')`, `selectRequiredOptionByTextOrValue('#sociedad', 'AASA')`); resuelven el `<select>` nativo internamente.",
     "   - Para LEER opciones en escenarios NOMINALES (afirmar que HAY opciones) usa `waitForSelectableOptions('#sociedad').then((opts) => { ... })`, que ESPERA a que se rellenen (son asíncronas). NO uses `getSelectOptions` para eso: leería 0 antes de que Angular renderice las `<option>`.",
     "   - Para LEER opciones en escenarios VACÍOS/negativos usa `getSelectOptions('#sociedad').then((opts) => { ... })`. NUNCA uses `cy.get('#sociedad').find('option')` porque `.find` reintenta hasta que exista una opción y COLGARÁ el test en escenarios vacíos.",
-    "   - Para inputs custom usa `setInputValue`/`setNumericFieldValue`/`setValueByFormControl` (resuelven el `<input>` interno).",
+    "   - Para CUALQUIER input usa exclusivamente `setInputValue`/`setNumericFieldValue`/`setValueByFormControl`. Resuelven el `<input>` interno, usan su setter nativo y crean `input`/`change` con `input.ownerDocument.defaultView.Event` (la misma ventana que la aplicación).",
+    "   - **PROHIBIDO reimplementar helpers locales de escritura o usar `clear()`/`type()`/`invoke('val')`/`trigger('input'/'change')` directamente (CORRUPCIÓN `[object Event]`)**: Cypress puede crear esos eventos en una ventana distinta de la aplicación; entonces una comprobación Angular `value instanceof Event` falla y el componente guarda el objeto Event como valor. Importa y usa exclusivamente los helpers compartidos.",
     "   - **ASERCIONES enabled/disabled SOBRE CONTROLES CUSTOM (CAUSA FRECUENTE DE FALLO)**: NUNCA hagas `.should('be.enabled')`/`.should('be.disabled')` directamente sobre un wrapper `empresas-ui-*` (`#pesoAeronave`, `empresas-ui-button`, ...). El pseudo-selector jQuery `:enabled`/`:disabled` SOLO matchea controles nativos (`input/select/textarea/button`), así que sobre un web component NUNCA matchea y el test AGOTA el timeout (`expected '<empresas-ui-input#pesoAeronave...>' to be 'enabled'`). Usa SIEMPRE `assertControlEnabled('#pesoAeronave')` / `assertControlDisabled('#selector')` (resuelven el nativo interno o comprueban `disabled`/`aria-disabled`/clase). Para `have.value`/`have.attr('placeholder')` sobre un control custom, usa `getNativeControl('#id').should('have.attr','placeholder', ...)`, no el wrapper.",
     "   - **NO ASUMAS QUE UN BOTÓN DE ACCIÓN SE DESHABILITA POR UNA VALIDACIÓN/SELECCIÓN INCOMPLETA (CAUSA FRECUENTE DE FALLO)**: en un CU de validación negativa NO stubeado (p. ej. \"seleccionar sociedad pero NO aeropuerto → el botón Descargar está deshabilitado\"), NO des por hecho que el botón queda `disabled`. Muchos botones permanecen HABILITADOS y la validación se manifiesta de OTRA forma (mensaje de error, atributo `viewValidation`/`ng-invalid`/clase de error en el campo, o error al pulsar). Antes de afirmar `assertUiButtonDisabled(...)`: (1) LOCALIZA en la plantilla el binding `[disabled]=\"...\"` (o `[isDisabled]`) del botón y comprueba de qué depende REALMENTE; si NO depende del control que dejaste incompleto (o no existe tal binding), NO afirmes `disabled` (fallarías con `expected false to equal true`). (2) En su lugar, afirma el INDICADOR DE ERROR real que el código renderiza para ese campo (p. ej. `cy.get('#selectAirport').should('have.attr','viewValidation')` / clase de error / mensaje literal presente en el HTML). (3) Mantén la INTENCIÓN del CU (verificar el escenario inválido) pero adáptala al comportamiento REAL observable del código, sin inventar `disabled` ni mensajes que no existan. Regla equivalente para HABILITAR: no asumas que un botón se habilita solo por rellenar un campo si el `[disabled]` depende de más condiciones.",
     "   - **SELECTOR DE UN SOLO ELEMENTO ANTES DE `have.attr`/`be.disabled` (CAUSA FRECUENTE DE FALLO)**: si un tag de componente se repite (p. ej. hay 7 `empresas-ui-button`), `cy.get('empresas-ui-button').should('have.attr','label', X)` FALLA (`expected '[ <empresas-ui-button.filtro>, 6 more... ]' to have attribute 'label'`) porque asevera sobre el conjunto. ACOTA a un único elemento: para botones usa `assertUiButtonDisabled('<label>')`/`assertUiButtonEnabled('<label>')`/`findUiButtonByLabel('<label>')` (matchean por atributo O propiedad O texto); para otros, un `id`/`class`/`data-*` literal o `.contains(...)`. NUNCA aseveres un atributo sobre un match múltiple.",
@@ -943,26 +945,76 @@ function buildE2EHelpersFile(): string {
     "  });",
     "}",
     "",
-    "function setInputValue(inputSelector, value) {",
+    "const trackedInputValues = {};",
+    "",
+    "if (typeof Cypress !== 'undefined' && typeof Cypress.on === 'function') {",
+    "  Cypress.on('test:before:run', () => {",
+    "    Object.keys(trackedInputValues).forEach((key) => delete trackedInputValues[key]);",
+    "  });",
+    "}",
+    "",
+    "function inputEvidenceKey(inputSelector, nativeInput, explicitKey) {",
+    "  if (explicitKey) return explicitKey;",
+    "  const formControlName = nativeInput.getAttribute('formcontrolname');",
+    "  if (formControlName) return formControlName;",
+    "  if (nativeInput.id) return nativeInput.id;",
+    "  const ownerWithId = nativeInput.parentElement && nativeInput.parentElement.closest('[id]');",
+    "  if (ownerWithId && ownerWithId.id) return ownerWithId.id;",
+    "  return inputSelector;",
+    "}",
+    "",
+    "function setNativeInputValue(nativeInput, valueAsText) {",
+    "  const appWindow = nativeInput.ownerDocument && nativeInput.ownerDocument.defaultView;",
+    "  if (!appWindow) throw new Error('No se pudo resolver la ventana de la aplicación para el input.');",
+    "  const prototype = nativeInput.tagName === 'TEXTAREA'",
+    "    ? appWindow.HTMLTextAreaElement.prototype",
+    "    : appWindow.HTMLInputElement.prototype;",
+    "  const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;",
+    "  if (!valueSetter) throw new Error('No se pudo resolver el setter nativo value del input.');",
+    "",
+    "  nativeInput.focus();",
+    "  valueSetter.call(nativeInput, valueAsText);",
+    "  nativeInput.dispatchEvent(new appWindow.Event('input', { bubbles: true, composed: true }));",
+    "  nativeInput.dispatchEvent(new appWindow.Event('change', { bubbles: true, composed: true }));",
+    "  nativeInput.blur();",
+    "}",
+    "",
+    "function setInputValue(inputSelector, value, evidenceKey) {",
     "  const valueAsText = String(value);",
-    "  cy.get(inputSelector, { timeout: 10000 })",
+    "  return cy.get(inputSelector, { timeout: 10000 })",
     "    .first()",
     "    .then(($input) => {",
-    "      cy.wrap($input)",
-    "        .click({ force: true })",
-    "        .invoke('val', valueAsText)",
-    "        .trigger('input', { force: true })",
-    "        .trigger('change', { force: true });",
-    "      cy.wrap($input).should('have.value', valueAsText);",
+    "      const nativeInput = $input[0];",
+    "      if (!nativeInput || !/^(INPUT|TEXTAREA)$/.test(nativeInput.tagName)) {",
+    "        throw new Error(`El selector \"${inputSelector}\" no resolvió un input/textarea nativo.`);",
+    "      }",
+    "      setNativeInputValue(nativeInput, valueAsText);",
+    "      return cy.get(inputSelector, { timeout: 10000 })",
+    "        .first()",
+    "        .should('have.value', valueAsText)",
+    "        .then(($verifiedInput) => {",
+    "          const verifiedInput = $verifiedInput[0];",
+    "          const key = inputEvidenceKey(inputSelector, verifiedInput, evidenceKey);",
+    "          trackedInputValues[key] = String(verifiedInput.value);",
+    "        });",
     "    });",
     "}",
     "",
     "function setNumericFieldValue(fieldSelector, value) {",
-    "  setInputValue(`${fieldSelector} input:not([type='hidden'])`, value);",
+    "  const idMatch = /^#([A-Za-z_][\\w-]*)$/.exec(fieldSelector.trim());",
+    "  return setInputValue(",
+    "    `${fieldSelector} input:not([type='hidden'])`,",
+    "    value,",
+    "    idMatch ? idMatch[1] : fieldSelector",
+    "  );",
     "}",
     "",
     "function setValueByFormControl(componentSelector, formControlName, value) {",
-    "  setInputValue(`${componentSelector} [formcontrolname='${formControlName}'] input`, value);",
+    "  return setInputValue(",
+    "    `${componentSelector} [formcontrolname='${formControlName}'] input`,",
+    "    value,",
+    "    formControlName",
+    "  );",
     "}",
     "",
     "function getNativeControl(rootSelector) {",
@@ -1095,6 +1147,36 @@ function buildE2EHelpersFile(): string {
     "    });",
     "}",
     "",
+    "function findSerializedEventPaths(value, currentPath = '$', seen = new WeakSet()) {",
+    "  if (typeof value === 'string') {",
+    "    return /^\\[object [^\\]]*Event\\]$/i.test(value.trim()) ? [currentPath] : [];",
+    "  }",
+    "  if (!value || typeof value !== 'object') return [];",
+    "  const tag = Object.prototype.toString.call(value);",
+    "  if (/^\\[object [^\\]]*Event\\]$/i.test(tag)) return [currentPath];",
+    "  if (seen.has(value)) return [];",
+    "  seen.add(value);",
+    "  const paths = [];",
+    "  Object.entries(value).forEach(([key, child]) => {",
+    "    paths.push(...findSerializedEventPaths(child, `${currentPath}.${key}`, seen));",
+    "  });",
+    "  return paths;",
+    "}",
+    "",
+    "function snapshotWithTrackedInputs(currentSnapshot) {",
+    "  const snapshot = currentSnapshot && typeof currentSnapshot === 'object' && !Array.isArray(currentSnapshot)",
+    "    ? { ...currentSnapshot }",
+    "    : { value: currentSnapshot };",
+    "  if (Object.keys(trackedInputValues).length === 0) return snapshot;",
+    "  const declaredInputs = snapshot.inputs && typeof snapshot.inputs === 'object' && !Array.isArray(snapshot.inputs)",
+    "    ? snapshot.inputs",
+    "    : {};",
+    "  return {",
+    "    ...snapshot,",
+    "    inputs: { ...declaredInputs, ...trackedInputValues }",
+    "  };",
+    "}",
+    "",
     "function persistOrAssertBaseline(key, currentSnapshot, options = {}) {",
     "  const baselineFixturePath = options.baselineFixturePath || DEFAULT_BASELINE_FIXTURE;",
     "  const envFlag = options.autoCapture !== undefined",
@@ -1103,25 +1185,42 @@ function buildE2EHelpersFile(): string {
     "  const autoCapture = String(envFlag === undefined ? 'true' : envFlag)",
     "    .toLowerCase()",
     "    .trim() !== 'false';",
-    "  cy.task('readBaseline', { filePath: baselineFixturePath }).then((baseline) => {",
-    "    const nextBaseline = baseline || {};",
-    "    const expectedSnapshot = nextBaseline[key];",
-    "    if (!expectedSnapshot && autoCapture) {",
-    "      nextBaseline[key] = currentSnapshot;",
-    "      cy.task('writeBaseline', { filePath: baselineFixturePath, data: nextBaseline }).then(() => {",
-    "        cy.log(`Baseline autocapturado para \"${key}\". En la siguiente ejecución se validará.`);",
-    "      });",
-    "      return;",
+    "  return cy.then(() => {",
+    "    const completeSnapshot = snapshotWithTrackedInputs(currentSnapshot);",
+    "    const eventPaths = findSerializedEventPaths(completeSnapshot);",
+    "    if (eventPaths.length > 0) {",
+    "      throw new Error(",
+    "        `Snapshot inválido para \"${key}\": contiene objetos Event en ${eventPaths.join(', ')}. ` +",
+    "        'Corrige la interacción del input; nunca persistas [object Event] como valor.'",
+    "      );",
     "    }",
-    "    expect(expectedSnapshot, `No existe baseline para \"${key}\".`).to.exist;",
-    "    const comparison = compareBaselineRecord(currentSnapshot, expectedSnapshot, {",
-    "      numericTolerance: DEFAULT_NUMERIC_TOLERANCE,",
-    "      ...(options.compareOptions || {})",
+    "    return cy.task('readBaseline', { filePath: baselineFixturePath }).then((baseline) => {",
+    "      const nextBaseline = baseline || {};",
+    "      const expectedSnapshot = nextBaseline[key];",
+    "      const baselineEventPaths = findSerializedEventPaths(expectedSnapshot);",
+    "      if (baselineEventPaths.length > 0) {",
+    "        throw new Error(",
+    "          `Baseline inválido para \"${key}\": contiene objetos Event en ${baselineEventPaths.join(', ')}. ` +",
+    "          'Elimina esa entrada y vuelve a ejecutar para autocapturarla.'",
+    "        );",
+    "      }",
+    "      if (!expectedSnapshot && autoCapture) {",
+    "        nextBaseline[key] = completeSnapshot;",
+    "        cy.task('writeBaseline', { filePath: baselineFixturePath, data: nextBaseline }).then(() => {",
+    "          cy.log(`Baseline autocapturado para \"${key}\". En la siguiente ejecución se validará.`);",
+    "        });",
+    "        return;",
+    "      }",
+    "      expect(expectedSnapshot, `No existe baseline para \"${key}\".`).to.exist;",
+    "      const comparison = compareBaselineRecord(completeSnapshot, expectedSnapshot, {",
+    "        numericTolerance: DEFAULT_NUMERIC_TOLERANCE,",
+    "        ...(options.compareOptions || {})",
+    "      });",
+    "      expect(",
+    "        comparison.isMatch,",
+    "        `Diferencias baseline en \"${key}\": ${JSON.stringify(comparison.mismatches, null, 2)}`",
+    "      ).to.eq(true);",
     "    });",
-    "    expect(",
-    "      comparison.isMatch,",
-    "      `Diferencias baseline en \"${key}\": ${JSON.stringify(comparison.mismatches, null, 2)}`",
-    "    ).to.eq(true);",
     "  });",
     "}",
     "",
@@ -1331,6 +1430,65 @@ async function clearBaselineMatching(
   }
 }
 
+function containsSerializedEvent(value: unknown): boolean {
+  if (typeof value === "string") {
+    return /^\[object [^\]]*Event\]$/i.test(value.trim());
+  }
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(containsSerializedEvent);
+  return Object.values(value as Record<string, unknown>).some(containsSerializedEvent);
+}
+
+/**
+ * Elimina snapshots contaminados por eventos DOM serializados y revoca el
+ * estado verde de sus CU. La siguiente ejecución los autocapturará de nuevo
+ * usando el helper de escritura nativa con eventos de la ventana AUT.
+ */
+async function purgeSerializedEventBaselines(context: LoadedContext): Promise<string[]> {
+  const frontendRoot = requireFrontendRoot(context);
+  const fixturePath = path.resolve(frontendRoot, baselineFixtureRelativePath);
+  const raw = await readTextIfExists(fixturePath);
+  if (!raw) return [];
+
+  let baseline: Record<string, unknown>;
+  try {
+    baseline = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+
+  const invalidKeys = Object.entries(baseline)
+    .filter(([, snapshot]) => containsSerializedEvent(snapshot))
+    .map(([key]) => key);
+  if (invalidKeys.length === 0) return [];
+
+  invalidKeys.forEach((key) => delete baseline[key]);
+  await fs.writeFile(fixturePath, `${JSON.stringify(baseline, null, 2)}\n`, "utf8");
+
+  const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
+  await fs.mkdir(outputRoot, { recursive: true });
+  const status = await readE2EStatus(outputRoot);
+  const knownUnitIds = new Map(
+    expandToCuUnits(extractOrBuildRfEntries(context)).map((unit) => [
+      unit.unitId.toLowerCase(),
+      unit.unitId,
+    ])
+  );
+  const unitIds = [
+    ...new Set(
+      invalidKeys
+        .map((key) => knownUnitIds.get(key.split(".").slice(0, 2).join(".").toLowerCase()))
+        .filter((unitId): unitId is string => Boolean(unitId))
+    ),
+  ];
+  const at = new Date().toISOString();
+  unitIds.forEach((unitId) => {
+    status[unitId.toLowerCase()] = { green: false, at, contractVersion: E2E_CONTRACT_VERSION };
+  });
+  await fs.writeFile(e2eStatusPath(outputRoot), `${JSON.stringify(status, null, 2)}\n`, "utf8");
+  return unitIds;
+}
+
 export interface E2EIterationResult {
   rf: string;
   file: string;
@@ -1356,6 +1514,7 @@ export interface GenerateE2EOptions {
 interface CuArtifactState {
   spec?: string;
   missingCalls: ReturnType<typeof missingScreenshotCalls>;
+  contractError?: string;
   evidenceReady: boolean;
   complete: boolean;
 }
@@ -1368,17 +1527,19 @@ async function inspectCuArtifacts(
 ): Promise<CuArtifactState> {
   const spec = await readTextIfExists(fullPath);
   const missingCalls = spec ? missingScreenshotCalls(spec, unit.rf, unit.cu) : actionScreenshots(unit.rf, unit.cu);
+  const contractError = spec ? specContractError(unit, spec) : undefined;
   const evidenceReady = spec
     ? await hasAllScreenshotEvidence(context, unit.rf, unit.cu)
     : false;
   return {
     spec,
     missingCalls,
+    contractError,
     evidenceReady,
     complete:
       Boolean(spec) &&
       isRfGreen(status, unit.unitId) &&
-      missingCalls.length === 0 &&
+      !contractError &&
       evidenceReady,
   };
 }
@@ -1393,8 +1554,41 @@ function screenshotContractError(unit: CuUnit, spec: string): string | undefined
   );
 }
 
-function requireScreenshotContract(unit: CuUnit, spec: string): void {
-  const error = screenshotContractError(unit, spec);
+function inputInteractionContractError(unit: CuUnit, spec: string): string | undefined {
+  const executableSpec = spec
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+  const violations: string[] = [];
+  if (/\bfunction\s+(?:fillNumericInput|fillInput|setInputValue|setNumericFieldValue|setValueByFormControl)\s*\(/.test(executableSpec)) {
+    violations.push("define un helper local de escritura");
+  }
+  if (/\.clear\s*\(/.test(executableSpec) || /\.type\s*\(/.test(executableSpec)) {
+    violations.push("usa `clear()`/`type()` directamente");
+  }
+  if (/\.invoke\s*\(\s*["']val["']/.test(executableSpec)) {
+    violations.push("usa `invoke('val', ...)`");
+  }
+  if (/\.trigger\s*\(\s*["'](?:input|change)["']/.test(executableSpec)) {
+    violations.push("emite `input`/`change` mediante `trigger()`");
+  }
+  if (violations.length === 0) return undefined;
+  return (
+    `CONTRATO DE INPUTS INCUMPLIDO para ${unit.unitId}: ${violations.join(", ")}. ` +
+    "El spec debe importar y usar exclusivamente setInputValue/setNumericFieldValue/" +
+    "setValueByFormControl; esos helpers emiten eventos desde la ventana AUT y registran los inputs del baseline."
+  );
+}
+
+function specContractError(unit: CuUnit, spec: string): string | undefined {
+  const errors = [screenshotContractError(unit, spec), inputInteractionContractError(unit, spec)]
+    .filter((error): error is string => Boolean(error));
+  return errors.length > 0 ? errors.join("\n") : undefined;
+}
+
+function requireSpecContract(unit: CuUnit, spec: string): void {
+  const error = specContractError(unit, spec);
   if (error) throw new Error(error);
 }
 
@@ -1420,6 +1614,7 @@ export async function generateE2ETests(
 
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
+  await purgeSerializedEventBaselines(context);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   await fs.mkdir(outputRoot, { recursive: true });
@@ -1471,11 +1666,11 @@ export async function generateE2ETests(
     const frontendContext = buildRfFocusedBundle(sources, entry);
 
     // Un verde sin spec, sin llamadas o sin PNG persistidos es inconsistente.
-    if (isRfGreen(initialStatus, unit.unitId)) {
+    if (initialStatus[unit.unitId.toLowerCase()]?.green === true) {
       await setRfGreen(outputRoot, unit.unitId, false);
     }
 
-    if (!target.exists || target.missingCalls.length > 0) {
+    if (!target.exists || target.contractError) {
       const generationPrompt = buildE2EGenerationPrompt({
         entry,
         rules: promptData.text,
@@ -1487,8 +1682,7 @@ export async function generateE2ETests(
           ? {
               currentSpec: target.spec,
               cypressOutput:
-                screenshotContractError(unit, target.spec) ??
-                "El spec debe incorporar una evidencia PNG por cada acción.",
+                target.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
               attempt: 0,
             }
           : undefined,
@@ -1503,7 +1697,7 @@ export async function generateE2ETests(
       }
 
       const sanitized = sanitizeGeneratedSpec(generated);
-      requireScreenshotContract(unit, sanitized);
+      requireSpecContract(unit, sanitized);
       await fs.writeFile(fullPath, sanitized, "utf8");
       files.push(fullPath);
     }
@@ -1638,7 +1832,7 @@ export async function generateE2ETests(
       const fixed = await sample(fixPrompt, 16000);
       if (fixed && fixed.trim().length > 0) {
         const sanitized = sanitizeGeneratedSpec(fixed);
-        requireScreenshotContract(unit, sanitized);
+        requireSpecContract(unit, sanitized);
         await fs.writeFile(fullPath, sanitized, "utf8");
         if (!files.includes(fullPath)) {
           files.push(fullPath);
@@ -1716,6 +1910,7 @@ function e2eStatusPath(outputRoot: string): string {
 interface E2EStatusEntry {
   green: boolean;
   at: string;
+  contractVersion?: number;
 }
 
 /**
@@ -1735,12 +1930,17 @@ async function readE2EStatus(outputRoot: string): Promise<Record<string, E2EStat
 }
 
 function isRfGreen(status: Record<string, E2EStatusEntry>, rfId: string): boolean {
-  return status[rfId.toLowerCase()]?.green === true;
+  const entry = status[rfId.toLowerCase()];
+  return entry?.green === true && entry.contractVersion === E2E_CONTRACT_VERSION;
 }
 
 async function setRfGreen(outputRoot: string, rfId: string, green: boolean): Promise<void> {
   const status = await readE2EStatus(outputRoot);
-  status[rfId.toLowerCase()] = { green, at: new Date().toISOString() };
+  status[rfId.toLowerCase()] = {
+    green,
+    at: new Date().toISOString(),
+    contractVersion: E2E_CONTRACT_VERSION,
+  };
   await fs.writeFile(e2eStatusPath(outputRoot), `${JSON.stringify(status, null, 2)}\n`, "utf8");
 }
 
@@ -1776,6 +1976,7 @@ export async function prepareE2EFallback(
 
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
+  await purgeSerializedEventBaselines(context);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   await fs.mkdir(outputRoot, { recursive: true });
@@ -1819,7 +2020,7 @@ export async function prepareE2EFallback(
   );
 
   for (const target of targets) {
-    if (isRfGreen(status, target.unit.unitId) && !target.complete) {
+    if (status[target.unit.unitId.toLowerCase()]?.green === true && !target.complete) {
       await setRfGreen(outputRoot, target.unit.unitId, false);
     }
   }
@@ -1853,7 +2054,7 @@ export async function prepareE2EFallback(
       specRelPath: current.specRelPath,
     };
 
-    if (current.exists && current.missingCalls.length === 0) {
+    if (current.exists && !current.contractError) {
       // Spec completo pero no verde/sin PNG persistidos: el siguiente paso es ejecutarlo.
       return {
         specs: [],
@@ -1885,8 +2086,7 @@ export async function prepareE2EFallback(
         ? {
             currentSpec: current.spec,
             cypressOutput:
-              screenshotContractError(current.unit, current.spec) ??
-              "El spec debe incorporar una evidencia PNG por cada acción.",
+              current.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
             attempt: 0,
           }
         : undefined,
@@ -1913,7 +2113,7 @@ export async function prepareE2EFallback(
     };
   }
 
-  const pending = targets.filter((t) => !t.exists || t.missingCalls.length > 0);
+  const pending = targets.filter((t) => !t.exists || Boolean(t.contractError));
   const pendingCount = pending.length;
   const allGenerated = pendingCount === 0;
 
@@ -1939,8 +2139,7 @@ export async function prepareE2EFallback(
         ? {
             currentSpec: target.spec,
             cypressOutput:
-              screenshotContractError(target.unit, target.spec) ??
-              "El spec debe incorporar una evidencia PNG por cada acción.",
+              target.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
             attempt: 0,
           }
         : undefined,
@@ -2089,6 +2288,10 @@ export async function runE2EFallback(
   } = options;
   const runCommand = options.runCommand ?? context.config.e2eRunCommand ?? "npx cypress run";
 
+  await ensureFrontendCypressSetup(context);
+  await writeBaselineAssets(context);
+  await purgeSerializedEventBaselines(context);
+
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   let entries: RfEntry[] = extractOrBuildRfEntries(context);
   if (rfFilter && rfFilter.length > 0) {
@@ -2182,7 +2385,7 @@ export async function runE2EFallback(
       continue;
     }
 
-    const contractError = screenshotContractError(unit, currentSpec);
+    const contractError = specContractError(unit, currentSpec);
     if (contractError) {
       await setRfGreen(outputRoot, unit.unitId, false);
       await clearScreenshotEvidence(context, unit.rf, unit.cu);

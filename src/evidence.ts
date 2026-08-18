@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { extractOrBuildRfEntries } from "./rfcu";
+import { E2EStatusLike, isCurrentGreenE2EStatus } from "./e2e-contract";
 import { CuCase, LoadedContext, RfEntry } from "./types";
 
 export type EvidenceTestKind = "REST" | "E2E";
@@ -24,11 +25,6 @@ interface CuUnit {
   cu: CuCase;
   unitId: string;
   e2eFileName: string;
-}
-
-interface E2EStatusEntry {
-  green?: unknown;
-  at?: unknown;
 }
 
 function slug(value: string): string {
@@ -159,13 +155,13 @@ function parseCypressTests(content: string): Array<{ name: string; title: string
   return tests;
 }
 
-async function readE2EStatus(e2eRoot: string): Promise<Record<string, E2EStatusEntry>> {
+async function readE2EStatus(e2eRoot: string): Promise<Record<string, E2EStatusLike>> {
   const raw = await readText(path.join(e2eRoot, ".qa-mcp-e2e-status.json"));
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, E2EStatusEntry>)
+      ? (parsed as Record<string, E2EStatusLike>)
       : {};
   } catch {
     return {};
@@ -175,7 +171,7 @@ async function readE2EStatus(e2eRoot: string): Promise<Record<string, E2EStatusE
 async function e2eExecutionFromDisk(params: {
   specFile: string;
   unit?: CuUnit;
-  status: Record<string, E2EStatusEntry>;
+  status: Record<string, E2EStatusLike>;
   skipped: boolean;
 }): Promise<{ status: EvidenceTestStatus; executedAt?: string; logFile?: string }> {
   if (params.skipped) return { status: "OMITIDO" };
@@ -188,7 +184,7 @@ async function e2eExecutionFromDisk(params: {
   const logDate = log?.match(/^Generado:\s*(.+)$/im)?.[1]?.trim();
 
   let testStatus: EvidenceTestStatus = "NO EJECUTADO";
-  if (state?.green === true || (!state && logResult === "PASA")) testStatus = "OK";
+  if (isCurrentGreenE2EStatus(state) || (!state && logResult === "PASA")) testStatus = "OK";
   else if (state?.green === false || (!state && logResult === "FALLA")) testStatus = "KO";
 
   return {
