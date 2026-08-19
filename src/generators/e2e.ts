@@ -1444,7 +1444,10 @@ function containsSerializedEvent(value: unknown): boolean {
  * estado verde de sus CU. La siguiente ejecución los autocapturará de nuevo
  * usando el helper de escritura nativa con eventos de la ventana AUT.
  */
-async function purgeSerializedEventBaselines(context: LoadedContext): Promise<string[]> {
+async function purgeSerializedEventBaselines(
+  context: LoadedContext,
+  rfFilter?: string[]
+): Promise<string[]> {
   const frontendRoot = requireFrontendRoot(context);
   const fixturePath = path.resolve(frontendRoot, baselineFixtureRelativePath);
   const raw = await readTextIfExists(fixturePath);
@@ -1457,8 +1460,14 @@ async function purgeSerializedEventBaselines(context: LoadedContext): Promise<st
     return [];
   }
 
+  const allowedRfIds = rfFilter && rfFilter.length > 0
+    ? new Set(rfFilter.map((id) => id.trim().toLowerCase()))
+    : undefined;
   const invalidKeys = Object.entries(baseline)
-    .filter(([, snapshot]) => containsSerializedEvent(snapshot))
+    .filter(([key, snapshot]) => {
+      const rfId = key.split(".")[0]?.toLowerCase();
+      return (!allowedRfIds || allowedRfIds.has(rfId)) && containsSerializedEvent(snapshot);
+    })
     .map(([key]) => key);
   if (invalidKeys.length === 0) return [];
 
@@ -1614,7 +1623,7 @@ export async function generateE2ETests(
 
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
-  await purgeSerializedEventBaselines(context);
+  await purgeSerializedEventBaselines(context, rfFilter);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   await fs.mkdir(outputRoot, { recursive: true });
@@ -1976,7 +1985,7 @@ export async function prepareE2EFallback(
 
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
-  await purgeSerializedEventBaselines(context);
+  await purgeSerializedEventBaselines(context, rfFilter);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   await fs.mkdir(outputRoot, { recursive: true });
@@ -2290,7 +2299,7 @@ export async function runE2EFallback(
 
   await ensureFrontendCypressSetup(context);
   await writeBaselineAssets(context);
-  await purgeSerializedEventBaselines(context);
+  await purgeSerializedEventBaselines(context, rfFilter);
 
   const outputRoot = path.resolve(path.dirname(context.configPath), context.config.e2eTests);
   let entries: RfEntry[] = extractOrBuildRfEntries(context);

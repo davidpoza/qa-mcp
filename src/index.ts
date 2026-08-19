@@ -88,6 +88,48 @@ function clientSupportsSampling(): boolean {
   }
 }
 
+function resolveRfSelection(rf?: string, rfFilter?: string[]): string[] | undefined {
+  const single = rf?.trim();
+  const multiple = (rfFilter ?? []).map((id) => id.trim()).filter(Boolean);
+  if (single && multiple.length > 0) {
+    throw new Error("Usa `rf` para un único RF o `rfFilter` para varios, pero no ambos a la vez.");
+  }
+  if (single) return [single];
+  if (multiple.length === 0) return undefined;
+  const seen = new Set<string>();
+  return multiple.filter((id) => {
+    const key = id.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function assistedScope(rfFilter?: string[]): {
+  label: string;
+  restricted: boolean;
+  generateCall: string;
+  runCall: string;
+} {
+  if (!rfFilter || rfFilter.length === 0) {
+    return {
+      label: "todos los RF",
+      restricted: false,
+      generateCall: "`generateE2ETests`",
+      runCall: "`runE2ETests`",
+    };
+  }
+  const args = rfFilter.length === 1
+    ? `{ "rf": ${JSON.stringify(rfFilter[0])} }`
+    : `{ "rfFilter": ${JSON.stringify(rfFilter)} }`;
+  return {
+    label: rfFilter.length === 1 ? `el RF ${rfFilter[0]}` : `los RF ${rfFilter.join(", ")}`,
+    restricted: true,
+    generateCall: `\`generateE2ETests\` con ${args}`,
+    runCall: `\`runE2ETests\` con ${args}`,
+  };
+}
+
 /**
  * Señal explícita para clientes con orquestación de subtasks (Boomerang /
  * Orchestrator, p. ej. Roo Code). El bucle RF-a-RF persiste su estado en disco,
@@ -97,7 +139,11 @@ function clientSupportsSampling(): boolean {
  * porque ya no queda trabajo ("done"). En clientes sin subtasks es solo texto
  * informativo e inocuo.
  */
-function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
+function buildSubtaskSignal(
+  mode: "advance" | "continue" | "done",
+  rfFilter?: string[]
+): string {
+  const scope = assistedScope(rfFilter);
   const header =
     "--- SEÑAL DE SUBTASK (clientes con Orchestrator/Boomerang, p. ej. Roo Code) ---";
   const footer = "--- FIN SEÑAL DE SUBTASK ---";
@@ -107,22 +153,34 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
     "(Code tiene `mcp`+`edit`+`command`). NO uses Ask (no edita) ni delegues la llamada a " +
     "la tool al propio Orchestrator (no ve las tools qa-mcp).";
   const delegatePrompt =
-    "\"Continúa el bucle E2E del siguiente CU pendiente de qa-mcp: llama a la tool " +
-    "generateE2ETests, escribe el .cy.js (UN solo CU por fichero) en la ruta EXACTA que te indique, llama a " +
-    "runE2ETests e itera (reescribe + runE2ETests) hasta que ESE CU pase. El CU " +
+    `\"Continúa el bucle E2E limitado a ${scope.label}: llama a ${scope.generateCall}, ` +
+    "escribe el .cy.js (UN solo CU por fichero) en la ruta EXACTA que te indique, llama a " +
+    `${scope.runCall} e itera (reescribe + runE2ETests) hasta que ESE CU pase. El CU ` +
     "pendiente y el estado (specs + verde) se resuelven solos desde disco, así que " +
     "empiezas con contexto limpio. Cuando el CU esté en verde, termina con " +
-    "attempt_completion. Si la tool responde que TODOS los CU están en verde, NO crees " +
+    `attempt_completion. Si la tool responde que todos los CU de ${scope.label} están en verde, NO crees ` +
     "más subtasks e informa de que el ciclo ha terminado.\"";
   if (mode === "done") {
     return [
       header,
       "QUEDA_TRABAJO: no",
-      "El ciclo CU-a-CU ha terminado (todos en verde). NO crees más subtasks; cierra la tarea con attempt_completion.",
+      `El ciclo CU-a-CU de ${scope.label} ha terminado (todos en verde). ` +
+        (scope.restricted ? "NO saltes a otro RF dentro de este contexto; " : "") +
+        "NO crees más subtasks para este ámbito; cierra la tarea con attempt_completion.",
       footer,
     ].join("\n");
   }
   if (mode === "advance") {
+    if (scope.restricted) {
+      return [
+        header,
+        "QUEDA_TRABAJO: sí (siguiente CU del mismo ámbito)",
+        `El CU en curso YA está en verde, pero aún queda trabajo en ${scope.label}. ` +
+          "NO cierres la tarea, NO uses attempt_completion y NO abras otro subtask: " +
+          `sigue en ESTA MISMA tarea llamando a ${scope.generateCall}.`,
+        footer,
+      ].join("\n");
+    }
     return [
       header,
       "QUEDA_TRABAJO: sí (siguiente CU)",
@@ -136,7 +194,10 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
   return [
     header,
     "QUEDA_TRABAJO: sí (CU en curso, aún no está en verde)",
-    "Sigue en ESTE MISMO subtask hasta que el CU en curso pase (generar/ejecutar/corregir). NO abras un subtask nuevo todavía: se abre uno por CU, al avanzar al siguiente.",
+    `Sigue en ESTA MISMA tarea hasta que el CU en curso pase (generar/ejecutar/corregir). ` +
+      (scope.restricted
+        ? `Después continúa también en esta tarea con los demás CU de ${scope.label}; sólo termina cuando TODO el ámbito esté verde.`
+        : "NO abras un subtask nuevo todavía: se abre uno por CU al avanzar al siguiente."),
     modeHint,
     footer,
   ].join("\n");
@@ -148,13 +209,15 @@ function buildSubtaskSignal(mode: "advance" | "continue" | "done"): string {
  * debe ordenarle explícitamente que encadene todos los pasos sin devolver el
  * control al usuario después de cada CU.
  */
-function buildAssistedAutoContinueMandate(): string {
+function buildAssistedAutoContinueMandate(rfFilter?: string[]): string {
+  const scope = assistedScope(rfFilter);
   return [
     "--- MANDATO INTEGRADO DE AUTOCONTINUACIÓN ---",
     "Esta respuesta es un paso intermedio, NO el final de la tarea.",
-    "TÚ, el agente cliente, DEBES ejecutar ahora las instrucciones devueltas, escribir/corregir el spec y encadenar las llamadas `runE2ETests` y `generateE2ETests` que hagan falta.",
+    `ÁMBITO INMUTABLE: ${scope.label}. No generes ni ejecutes CU de ningún RF fuera de este ámbito.`,
+    `TÚ, el agente cliente, DEBES ejecutar ahora las instrucciones devueltas, escribir/corregir el spec y encadenar ${scope.runCall} y ${scope.generateCall} cuantas veces haga falta.`,
     "NO pidas confirmación al usuario entre CU, NO te detengas al dejar un único CU en verde y NO cierres la tarea mientras quede trabajo.",
-    "Continúa autónomamente hasta que una respuesta indique expresamente que TODOS los CU están en verde. Si dispones de Orchestrator/subtasks, sigue además la SEÑAL DE SUBTASK incluida al final.",
+    `Continúa autónomamente hasta que una respuesta indique expresamente que todos los CU de ${scope.label} están en verde. Si dispones de Orchestrator/subtasks, sigue además la SEÑAL DE SUBTASK incluida al final.`,
     "--- FIN MANDATO INTEGRADO ---",
   ].join("\n");
 }
@@ -164,7 +227,8 @@ function buildAssistedAutoContinueMandate(): string {
  * verde). Según `nextAction` indica al agente si debe generar el spec del RF en
  * curso, ejecutarlo con `runE2ETests`, o si ya está todo en verde.
  */
-function formatE2EFallback(fallback: E2EFallbackResult): string {
+function formatE2EFallback(fallback: E2EFallbackResult, rfFilter?: string[]): string {
+  const scope = assistedScope(rfFilter);
   const cleanContextTip =
     "CONTEXTO LIMPIO: el progreso se guarda en disco (specs + estado verde). " +
     "Si el cliente permite crear subtasks, delega AUTOMÁTICAMENTE el siguiente CU con contexto limpio; " +
@@ -175,10 +239,12 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     return [
       "✅ MODO ASISTIDO: TODOS los CU del ámbito están en VERDE.",
       `CU en verde: ${fallback.greenCount}/${fallback.totalCount}.`,
+      `Ámbito solicitado: ${scope.label}.`,
       "No queda nada por generar ni ejecutar. (Para revalidar un CU, borra su entrada del estado o su .cy.js.)",
       `Directorio de trabajo: ${fallback.frontendRoot}`,
       "",
-      buildSubtaskSignal("done"),
+      buildSubtaskSignal("done", rfFilter),
+      "SIGUIENTE_ACCIÓN_OBLIGATORIA: ninguna. Este ámbito ha terminado.",
     ].join("\n");
   }
 
@@ -187,19 +253,21 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     return [
       `⚠️ MODO ASISTIDO (bucle CU-a-CU): el spec de ${c?.rf} — ${c?.name} YA existe pero aún no está en verde.`,
       `Progreso: ${fallback.greenCount}/${fallback.totalCount} CU en verde.`,
+      `Ámbito solicitado: ${scope.label}.`,
       "",
-      buildAssistedAutoContinueMandate(),
+      buildAssistedAutoContinueMandate(rfFilter),
       "",
       "QUÉ HACER AHORA:",
-      "1) NO regeneres el spec. Llama a `runE2ETests` para EJECUTARLO y obtener el feedback real de Cypress.",
-      "2) Si falla, `runE2ETests` te da el prompt de corrección; reescribe el spec y vuelve a llamar a `runE2ETests` hasta que ese CU pase.",
-      "3) Cuando pase, se marca en verde y podrás pasar al siguiente CU con `generateE2ETests`.",
+      `1) NO regeneres el spec. Llama a ${scope.runCall} para EJECUTARLO y obtener el feedback real de Cypress.`,
+      `2) Si falla, \`runE2ETests\` te da el prompt de corrección; reescribe el spec y vuelve a llamar a ${scope.runCall} hasta que ese CU pase.`,
+      `3) Cuando pase, se marca en verde y podrás pasar al siguiente CU del mismo ámbito con ${scope.generateCall}.`,
       `Ruta del spec: ${c?.filePath}`,
       `Directorio de trabajo para Cypress: ${fallback.frontendRoot}`,
       "",
       cleanContextTip,
       "",
-      buildSubtaskSignal("continue"),
+      buildSubtaskSignal("continue", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: llama ahora a ${scope.runCall}. No respondas al usuario ni cierres la tarea.`,
     ].join("\n");
   }
 
@@ -210,13 +278,14 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     "El entorno Cypress YA está preparado (helpers, config y baseline escritos).",
     "",
     `Progreso: ${fallback.greenCount}/${fallback.totalCount} CU en verde. Este mensaje contiene el CU EN CURSO (uno a uno; cada CU es un fichero .cy.js propio y no se avanza al siguiente hasta que este pase).`,
+    `Ámbito solicitado: ${scope.label}.`,
     "",
-    buildAssistedAutoContinueMandate(),
+    buildAssistedAutoContinueMandate(rfFilter),
     "",
     "QUÉ HACER AHORA:",
     "1) Genera el contenido del `.cy.js` (JavaScript PLANO, sin TypeScript) siguiendo EXACTAMENTE el PROMPT de abajo. UN solo CU (un `describe` con un único `it`) por fichero.",
     "2) Escríbelo en la RUTA DE SALIDA exacta (no cambies el nombre).",
-    "3) Llama a `runE2ETests` para EJECUTAR ESTE CU. Itera (reescribe + `runE2ETests`) hasta que pase; solo entonces avanza al siguiente CU con `generateE2ETests`.",
+    `3) Llama a ${scope.runCall} para EJECUTAR ESTE CU. Itera (reescribe + la misma llamada) hasta que pase; solo entonces avanza al siguiente CU del ámbito con ${scope.generateCall}.`,
     "IMPORTANTE: NO intentes 'arreglar' errores de tipos de TypeScript ni tocar tsconfig; los specs son `.cy.js` y Cypress NO hace type-check. El ÚNICO criterio de éxito es que Cypress pase (usa `runE2ETests`).",
     "",
     `===== ${spec.rf} — ${spec.name} =====`,
@@ -229,7 +298,8 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
     "",
     cleanContextTip,
     "",
-    buildSubtaskSignal("continue"),
+    buildSubtaskSignal("continue", rfFilter),
+    `SIGUIENTE_ACCIÓN_OBLIGATORIA: escribe el spec indicado y llama ahora a ${scope.runCall}. No respondas al usuario ni cierres la tarea.`,
   ].join("\n");
 }
 
@@ -238,9 +308,10 @@ function formatE2EFallback(fallback: E2EFallbackResult): string {
  * RF en curso y, según `nextAction`, indica al agente si debe corregirlo,
  * generar su spec, avanzar al siguiente RF o si ya está todo en verde.
  */
-function formatE2ERun(run: E2ERunFallbackResult): string {
+function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
+  const scope = assistedScope(rfFilter);
   const cleanContextTip =
-    "CONTEXTO LIMPIO: el progreso está en disco. Para el siguiente CU, llama a `generateE2ETests` " +
+    `CONTEXTO LIMPIO: el progreso está en disco. Para el siguiente CU, llama a ${scope.generateCall} ` +
     "automáticamente. Si dispones de subtasks, delega uno con contexto limpio; si no, continúa aquí. " +
     "NO pidas intervención al usuario.";
   const diagLine =
@@ -256,9 +327,11 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       "✅ TODOS los CU del ámbito están en VERDE.",
       `CU en verde: ${green}/${total}.`,
+      `Ámbito solicitado: ${scope.label}.`,
       `Directorio de trabajo: ${run.frontendRoot}`,
       "",
-      buildSubtaskSignal("done"),
+      buildSubtaskSignal("done", rfFilter),
+      "SIGUIENTE_ACCIÓN_OBLIGATORIA: ninguna. Este ámbito ha terminado.",
     ]);
   }
 
@@ -266,13 +339,15 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       `El CU en curso (${single?.rf ?? "?"} — ${single?.name ?? ""}) aún no tiene spec.`,
       `Progreso: ${green}/${total} CU en verde.`,
+      `Ámbito solicitado: ${scope.label}.`,
       "",
-      buildAssistedAutoContinueMandate(),
+      buildAssistedAutoContinueMandate(rfFilter),
       "",
-      "Llama a `generateE2ETests` para obtener su prompt de generación, escribe el `.cy.js` y vuelve a `runE2ETests`.",
+      `Llama a ${scope.generateCall} para obtener su prompt de generación, escribe el \`.cy.js\` y vuelve a ${scope.runCall}.`,
       single ? `Ruta esperada del spec: ${single.filePath}` : "",
       "",
-      buildSubtaskSignal("continue"),
+      buildSubtaskSignal("continue", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: llama ahora a ${scope.generateCall}. No respondas al usuario ni cierres la tarea.`,
     ].filter(Boolean));
   }
 
@@ -280,14 +355,16 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       `✅ ${single?.rf} — ${single?.name}: PASA. Marcado en verde.`,
       `Progreso: ${green}/${total} CU en verde.`,
+      `Ámbito solicitado: ${scope.label}.`,
       "",
-      buildAssistedAutoContinueMandate(),
+      buildAssistedAutoContinueMandate(rfFilter),
       "",
-      "Siguiente paso: pasa al siguiente CU llamando a `generateE2ETests`.",
+      `Siguiente paso: pasa al siguiente CU del ámbito llamando a ${scope.generateCall}.`,
       cleanContextTip,
       `Directorio de trabajo: ${run.frontendRoot}`,
       "",
-      buildSubtaskSignal("advance"),
+      buildSubtaskSignal("advance", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: llama ahora a ${scope.generateCall}. No respondas al usuario ni cierres la tarea mientras queden CU en el ámbito.`,
     ]);
   }
 
@@ -296,25 +373,28 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     return withDiag([
       `⚠️ ${single?.rf} — ${single?.name}: Cypress NO arrancó por un error de ENTORNO (caché V8), no del spec.`,
       `Progreso: ${green}/${total} CU en verde.`,
+      `Ámbito solicitado: ${scope.label}.`,
       "",
-      buildAssistedAutoContinueMandate(),
+      buildAssistedAutoContinueMandate(rfFilter),
       "",
       "NO reescribas el spec: no soluciona nada. Repara la caché de Cypress y reintenta.",
       single?.output ?? "(sin salida)",
       "",
-      buildSubtaskSignal("continue"),
+      buildSubtaskSignal("continue", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: repara el entorno y vuelve a llamar a ${scope.runCall}. No cierres la tarea.`,
     ]);
   }
   return withDiag([
     `❌ ${single?.rf} — ${single?.name}: FALLA.`,
     `Progreso: ${green}/${total} CU en verde. Este CU NO avanza hasta que pase.`,
+    `Ámbito solicitado: ${scope.label}.`,
     "",
-    buildAssistedAutoContinueMandate(),
+    buildAssistedAutoContinueMandate(rfFilter),
     "",
     "QUÉ HACER AHORA (BUCLE hasta verde — NO te detengas tras un solo intento):",
     "1) Diagnostica con la salida de Cypress de abajo y aplica el PROMPT DE CORRECCIÓN.",
     "2) Reescribe (SOBRESCRIBE) el spec completo en su ruta (JavaScript PLANO, sin TypeScript). NO toques tsconfig ni errores de tipos.",
-    "3) VUELVE A LLAMAR a `runE2ETests` (mismo CU) para verificar. Repite corrección→`runE2ETests` hasta que ESTE CU pase (green). NO cierres la tarea con el CU aún en rojo.",
+    `3) VUELVE A LLAMAR a ${scope.runCall} (mismo CU) para verificar. Repite corrección→ejecución hasta que ESTE CU pase (green). NO cierres la tarea con el CU aún en rojo.`,
     "   · Solo si el contexto se te está llenando: puedes cerrar la tarea y dejar que una tarea/subtask NUEVA reanude ESTE MISMO CU (el spec y el estado están en disco; el servidor reengancha el primer CU no verde). Es un OFFLOAD opcional, no un fin del bucle.",
     "",
     `===== ${single?.rf} — ${single?.name} =====`,
@@ -326,7 +406,8 @@ function formatE2ERun(run: E2ERunFallbackResult): string {
     single?.fixPrompt ?? "(no disponible)",
     "--- FIN PROMPT ---",
     "",
-    buildSubtaskSignal("continue"),
+    buildSubtaskSignal("continue", rfFilter),
+    `SIGUIENTE_ACCIÓN_OBLIGATORIA: aplica el prompt de corrección al spec y llama inmediatamente a ${scope.runCall}. No respondas al usuario ni cierres la tarea con el CU rojo.`,
   ].filter(Boolean));
 }
 
@@ -375,36 +456,39 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Cada acción de rf-cu.md incorpora una llamada cy.screenshot con nombre rfx_cuy_NN y su PNG se persiste en evidence.output/screenshots para exportETPAsWord. Herramienta AUTÓNOMA y reanudable: consulta .qa-mcp-e2e-status.json y sólo omite un CU si tiene spec, green: true, todas las llamadas de captura y todos los PNG; genera/repara o vuelve a ejecutar cualquier CU incompleto. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Es la tool a usar cuando el usuario pide 'generar/ejecutar tests E2E o Cypress'. Sin MCP sampling (modo asistido), su propia respuesta incorpora el MANDATO que el agente cliente debe seguir: generar/escribir el CU indicado, llamar a runE2ETests, corregir hasta verde y volver a generateE2ETests para el siguiente CU, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. El usuario solo necesita invocar generateE2ETests una vez; el agente debe encadenar las siguientes llamadas. El progreso se guarda EN DISCO y es reanudable.",
+  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Acepta `rf` para limitar TODA la ejecución a un único requisito funcional (p. ej. RF-3); no genera, ejecuta ni repara CU de otros RF. `rfFilter` se conserva para seleccionar varios RF. Cada acción de rf-cu.md incorpora una llamada cy.screenshot con nombre rfx_cuy_NN y su PNG se persiste en evidence.output/screenshots para exportETPAsWord. Herramienta AUTÓNOMA y reanudable: consulta .qa-mcp-e2e-status.json y sólo omite un CU si tiene spec, green: true, todas las llamadas de captura y todos los PNG; genera/repara o vuelve a ejecutar cualquier CU incompleto. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Sin MCP sampling, su respuesta obliga al agente a repetir el mismo `rf` en generateE2ETests/runE2ETests hasta completar únicamente ese ámbito. El progreso se guarda EN DISCO y es reanudable.",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),
     maxIterations: z.number().int().min(1).max(10).optional(),
-    rfFilter: z.array(z.string()).optional(),
+    rf: z.string().min(1).optional().describe("ID exacto de un único RF, p. ej. RF-3. Limita todo el ciclo a sus CU."),
+    rfFilter: z.array(z.string().min(1)).optional().describe("Compatibilidad: lista de uno o varios RF. No combinar con rf."),
     assisted: z.boolean().optional(),
   },
-  async ({ promptOverride, runTests, maxIterations, rfFilter, assisted }) => {
+  async ({ promptOverride, runTests, maxIterations, rf, rfFilter, assisted }) => {
     const context = await loadContext();
+    const selectedRfFilter = resolveRfSelection(rf, rfFilter);
 
     if (assisted || !clientSupportsSampling()) {
       const fallback = await prepareE2EFallback(context, {
         promptOverride,
-        rfFilter,
+        rfFilter: selectedRfFilter,
         untilGreen: true,
         leanFrontend: true,
       });
-      return asToolResult(formatE2EFallback(fallback));
+      return asToolResult(formatE2EFallback(fallback, selectedRfFilter));
     }
 
     const result = await generateE2ETests(context, sampleWithClient, {
       promptOverride,
       runTests,
       maxIterations,
-      rfFilter,
+      rfFilter: selectedRfFilter,
     });
 
     const lines: string[] = [
       `Generados o reparados ${result.files.length} specs Cypress en ${context.config.e2eTests}.`,
+      `Ámbito procesado: ${assistedScope(selectedRfFilter).label}.`,
       `Estado acumulado: ${result.greenCount}/${result.rfCount} CU en verde.`,
     ];
 
@@ -446,20 +530,22 @@ registerToolCompat(
 registerToolCompat(
   server,
   "runE2ETests",
-  "EJECUTA en Cypress el CU EN CURSO (el primero no verde, o el perteneciente al rfFilter indicado) y devuelve feedback. Es parte del bucle autónomo asistido: el agente cliente DEBE aplicar el prompt de corrección y volver a llamar hasta que el CU pase; cuando pase, DEBE llamar a generateE2ETests para continuar con el siguiente, sin pedir confirmación ni detenerse hasta que TODOS estén verdes. Cada respuesta incorpora este mandato. Ejecuta solo un CU por llamada para no desbordar el contexto y persiste el progreso en disco.",
+  "EJECUTA en Cypress el CU EN CURSO y devuelve feedback. Acepta `rf` para limitar estrictamente la ejecución a un único requisito funcional; durante un ciclo iniciado con generateE2ETests({rf}) debe repetirse el mismo `rf` en cada llamada. `rfFilter` permite varios RF por compatibilidad. Ejecuta sólo un CU por llamada y persiste el progreso en disco.",
   {
-    rfFilter: z.array(z.string()).optional(),
+    rf: z.string().min(1).optional().describe("ID exacto del único RF cuyo CU debe ejecutarse, p. ej. RF-3."),
+    rfFilter: z.array(z.string().min(1)).optional().describe("Compatibilidad: lista de uno o varios RF. No combinar con rf."),
     promptOverride: z.string().optional(),
   },
-  async ({ rfFilter, promptOverride }) => {
+  async ({ rf, rfFilter, promptOverride }) => {
     const context = await loadContext();
+    const selectedRfFilter = resolveRfSelection(rf, rfFilter);
     const run = await runE2EFallback(context, {
-      rfFilter,
+      rfFilter: selectedRfFilter,
       promptOverride,
       untilGreen: true,
       leanFrontend: true,
     });
-    return asToolResult(formatE2ERun(run));
+    return asToolResult(formatE2ERun(run, selectedRfFilter));
   }
 );
 

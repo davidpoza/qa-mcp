@@ -76,9 +76,22 @@ En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `gene
 **Ejecución iterativa (auto-fix):** por defecto, `generateE2ETests` **ejecuta Cypress** sobre cada CU pendiente. Si el spec no existe, primero lo genera; si ya existe, no está verde y cumple el contrato actual, lo conserva y lo ejecuta directamente. Si usa una interacción de input insegura o le faltan evidencias, primero solicita su reparación al modelo. Cuando Cypress falla, pide al modelo que **corrija el spec usando la salida de error real**, repitiendo hasta que pase o se agoten los intentos. Cada resultado se persiste como `green: true/false` y `contractVersion` en `.qa-mcp-e2e-status.json`. Parámetros de la tool:
 - `runTests` (bool, por defecto `true`): ejecuta Cypress e itera. Ponlo a `false` para solo generar.
 - `maxIterations` (número, por defecto `3`): intentos máximos por CU (1 generación + N-1 correcciones).
-- `rfFilter` (array de ids, opcional): limita a ciertos RF, p. ej. `["RF-01","RF-03"]`.
+- `rf` (string, opcional): limita estrictamente todo el ciclo a un único RF, p. ej. `"RF-3"`. Es la opción recomendada para ejecutar una tarea/contexto independiente por RF.
+- `rfFilter` (array de ids, opcional): compatibilidad para limitar a varios RF, p. ej. `["RF-01","RF-03"]`. No se combina con `rf`.
 - `promptOverride` (string, opcional).
 Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). Cada acción definida en `rf-cu.md` genera además una captura explícita con `cy.screenshot()`: `rf1_cu1_01.png`, `rf1_cu1_02.png`, etc. El número de acción siempre usa dos dígitos. Cypress crea el PNG nativo y la tool lo copia a `evidence.output/screenshots`, una ubicación estable que no se borra al ejecutar el siguiente spec. Un CU sólo se considera completamente verde cuando el spec contiene todas las llamadas y existen todas sus capturas; por eso los CU verdes antiguos sin estas evidencias vuelven automáticamente al bucle. El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe acumulado y un extracto de la salida de Cypress para los CU que siguen fallando.
+
+### Un contexto por RF
+
+Para generar únicamente los tests de un requisito funcional:
+
+```json
+{
+  "rf": "RF-3"
+}
+```
+
+La tool sólo considera los CU de `RF-3`: no genera, ejecuta, repara ni cambia el estado de otros RF. En modo asistido, todas las respuestas incorporan el mismo argumento en las llamadas posteriores (`runE2ETests({ "rf": "RF-3" })` y `generateE2ETests({ "rf": "RF-3" })`) y ordenan continuar en la misma tarea mientras quede algún CU de ese RF en rojo. Cada respuesta termina además con una `SIGUIENTE_ACCIÓN_OBLIGATORIA` concreta para evitar que el agente dé por finalizado el bucle después de una sola ejecución. Sólo cuando todos sus CU están verdes, la respuesta termina el ámbito y ordena no saltar a otro RF. Se puede entonces abrir una tarea o contexto nuevo e invocar la tool con el siguiente RF; el progreso anterior se recupera desde disco.
 
 ## Exportación del ETP a Excel
 
