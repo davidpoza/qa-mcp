@@ -7,6 +7,7 @@ import { generateRestTests } from "./generators/rest";
 import { generateE2ETests, prepareE2EFallback, runE2EFallback, E2EFallbackResult, E2ERunFallbackResult } from "./generators/e2e";
 import { exportETPAsExcel } from "./exporters/excel";
 import { exportETPAsWord } from "./exporters/word";
+import { E2E_CONTRACT_VERSION } from "./e2e-contract";
 
 type ToolHandler<T> = (args: T) => Promise<{ content: Array<{ type: "text"; text: string }> }>;
 
@@ -229,6 +230,7 @@ function buildAssistedAutoContinueMandate(rfFilter?: string[]): string {
  */
 function formatE2EFallback(fallback: E2EFallbackResult, rfFilter?: string[]): string {
   const scope = assistedScope(rfFilter);
+  const contractLine = `[qa-mcp] Contrato E2E activo: v${E2E_CONTRACT_VERSION}.`;
   const cleanContextTip =
     "CONTEXTO LIMPIO: el progreso se guarda en disco (specs + estado verde). " +
     "Si el cliente permite crear subtasks, delega AUTOMÁTICAMENTE el siguiente CU con contexto limpio; " +
@@ -237,6 +239,7 @@ function formatE2EFallback(fallback: E2EFallbackResult, rfFilter?: string[]): st
 
   if (fallback.nextAction === "done") {
     return [
+      contractLine,
       "✅ MODO ASISTIDO: TODOS los CU del ámbito están en VERDE.",
       `CU en verde: ${fallback.greenCount}/${fallback.totalCount}.`,
       `Ámbito solicitado: ${scope.label}.`,
@@ -251,6 +254,7 @@ function formatE2EFallback(fallback: E2EFallbackResult, rfFilter?: string[]): st
   if (fallback.nextAction === "run") {
     const c = fallback.current;
     return [
+      contractLine,
       `⚠️ MODO ASISTIDO (bucle CU-a-CU): el spec de ${c?.rf} — ${c?.name} YA existe pero aún no está en verde.`,
       `Progreso: ${fallback.greenCount}/${fallback.totalCount} CU en verde.`,
       `Ámbito solicitado: ${scope.label}.`,
@@ -274,6 +278,7 @@ function formatE2EFallback(fallback: E2EFallbackResult, rfFilter?: string[]): st
   // nextAction === "generate"
   const spec = fallback.specs[0];
   return [
+    contractLine,
     "⚠️ MODO ASISTIDO (bucle CU-a-CU hasta verde): este cliente no soporta 'sampling/createMessage'. El servidor NO genera el spec; te da el prompt para que lo generes tú (el agente).",
     "El entorno Cypress YA está preparado (helpers, config y baseline escritos).",
     "",
@@ -315,7 +320,7 @@ function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
     "automáticamente. Si dispones de subtasks, delega uno con contexto limpio; si no, continúa aquí. " +
     "NO pidas intervención al usuario.";
   const diagLine =
-    `[qa-mcp] Config cargada: ${run.configPath ?? "(desconocida)"} | ` +
+    `[qa-mcp] Contrato E2E activo: v${E2E_CONTRACT_VERSION} | Config cargada: ${run.configPath ?? "(desconocida)"} | ` +
     `headed: ${run.headed ? "sí (--headed)" : "no"}` +
     `${run.browser ? ` | browser: ${run.browser}` : ""}`;
   const withDiag = (lines: string[]): string => [diagLine, "", ...lines].join("\n");
@@ -414,7 +419,7 @@ function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
 registerToolCompat(
   server,
   "autoCompleteRfCu",
-  "SOLO edita/rellena el fichero rf-cu.md (RF, CU y pasos) cuando está incompleto. NO genera código de tests ni ejecuta Cypress. Úsala únicamente cuando el usuario pida completar/generar el rf-cu.md; NO es un paso previo necesario para generateE2ETests. Si el cliente no soporta MCP sampling, devuelve el prompt para que el agente genere y escriba el rf-cu.md (modo asistido).",
+  "SOLO edita/rellena rf-cu.md. Cada CU debe declarar en `Valores de controles` todos los input/select/checkbox con su tipo, clave de baseline, selector, valor literal y acción NN; en selects se usa el texto visible y en checkbox true/false. No puede indicar `Ninguno` si selecciona un dropdown. Cada interacción ocupa una acción independiente. NO genera tests ni ejecuta Cypress. Si el cliente no soporta sampling, devuelve al agente el prompt completo integrado.",
   {
     requirementsPath: z.string().optional(),
     assisted: z.boolean().optional(),
@@ -456,7 +461,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA los tests E2E de Cypress (.cy.js) CU a CU, iterando hasta que cada uno pasa antes de avanzar al siguiente. Acepta `rf` para limitar TODA la ejecución a un único requisito funcional (p. ej. RF-3); no genera, ejecuta ni repara CU de otros RF. `rfFilter` se conserva para seleccionar varios RF. Cada acción de rf-cu.md incorpora una llamada cy.screenshot con nombre rfx_cuy_NN y su PNG se persiste en evidence.output/screenshots para exportETPAsWord. Herramienta AUTÓNOMA y reanudable: consulta .qa-mcp-e2e-status.json y sólo omite un CU si tiene spec, green: true, todas las llamadas de captura y todos los PNG; genera/repara o vuelve a ejecutar cualquier CU incompleto. NO requiere ejecutar antes autoCompleteRfCu ni ninguna otra tool. Sin MCP sampling, su respuesta obliga al agente a repetir el mismo `rf` en generateE2ETests/runE2ETests hasta completar únicamente ese ámbito. El progreso se guarda EN DISCO y es reanudable.",
+  "Genera y EJECUTA tests Cypress CU a CU hasta verde. Acepta `rf` para limitar el ciclo a un RF. Fija viewport 1920x1080 y escala/DPR 1 (100 %), y rechaza PNG que no midan exactamente 1920x1080. Todos los datos declarados en `Valores de controles` se establecen mediante setDocumentedControl: input, select/dropdown y checkbox se vuelven a localizar, entran en viewport, se valida su valor/estado visible, se resaltan y se capturan en rfx_cuy_NN; además coinciden con e2e-baseline.json. No considera completo un CU sin spec vigente, green:true, contrato actual, llamadas y PNG Full HD. Rechaza rf-cu antiguos, dropdowns no documentados, acciones agrupadas o evidencias genéricas. Sin sampling devuelve instrucciones autónomas integradas. El progreso queda en disco.",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),
@@ -487,6 +492,7 @@ registerToolCompat(
     });
 
     const lines: string[] = [
+      `[qa-mcp] Contrato E2E activo: v${E2E_CONTRACT_VERSION}.`,
       `Generados o reparados ${result.files.length} specs Cypress en ${context.config.e2eTests}.`,
       `Ámbito procesado: ${assistedScope(selectedRfFilter).label}.`,
       `Estado acumulado: ${result.greenCount}/${result.rfCount} CU en verde.`,

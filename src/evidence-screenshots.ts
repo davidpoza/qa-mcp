@@ -9,6 +9,9 @@ export interface ActionScreenshot {
   fileName: string;
 }
 
+export const EVIDENCE_SCREENSHOT_WIDTH = 1920;
+export const EVIDENCE_SCREENSHOT_HEIGHT = 1080;
+
 function evidenceId(value: string, fallback: string): string {
   const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "");
   return normalized || fallback;
@@ -63,22 +66,47 @@ function screenshotCallPattern(baseName: string): RegExp {
   );
 }
 
-/** Devuelve las capturas obligatorias que no están llamadas desde el spec. */
-export function missingScreenshotCalls(spec: string, rf: RfEntry, cu: CuCase): ActionScreenshot[] {
-  return actionScreenshots(rf, cu).filter(
-    (screenshot) => !screenshotCallPattern(screenshot.baseName).test(spec)
+function documentedControlEvidencePattern(baseName: string): RegExp {
+  return new RegExp(
+    "\\bsetDocumented(?:Control|Input)\\s*\\([^;]*([\"'`])" +
+      baseName +
+      "\\1\\s*\\)"
   );
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
+/** Devuelve las capturas obligatorias que no están llamadas desde el spec. */
+export function missingScreenshotCalls(spec: string, rf: RfEntry, cu: CuCase): ActionScreenshot[] {
+  return actionScreenshots(rf, cu).filter(
+    (screenshot) =>
+      !screenshotCallPattern(screenshot.baseName).test(spec) &&
+      !documentedControlEvidencePattern(screenshot.baseName).test(spec)
+  );
+}
+
+async function pngDimensions(filePath: string): Promise<{ width: number; height: number } | undefined> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
+    handle = await fs.open(filePath, "r");
+    const header = Buffer.alloc(24);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    const isPng =
+      bytesRead === header.length &&
+      header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (!isPng) return undefined;
+    return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
-    if (nodeError.code === "ENOENT") return false;
+    if (nodeError.code === "ENOENT") return undefined;
     throw error;
+  } finally {
+    await handle?.close();
   }
+}
+
+async function isFullHdEvidence(filePath: string): Promise<boolean> {
+  const dimensions = await pngDimensions(filePath);
+  return dimensions?.width === EVIDENCE_SCREENSHOT_WIDTH &&
+    dimensions.height === EVIDENCE_SCREENSHOT_HEIGHT;
 }
 
 export async function hasAllScreenshotEvidence(
@@ -89,7 +117,7 @@ export async function hasAllScreenshotEvidence(
   const directory = screenshotEvidenceDirectory(context);
   const expected = actionScreenshots(rf, cu);
   const present = await Promise.all(
-    expected.map((screenshot) => fileExists(path.join(directory, screenshot.fileName)))
+    expected.map((screenshot) => isFullHdEvidence(path.join(directory, screenshot.fileName)))
   );
   return present.every(Boolean);
 }
@@ -191,8 +219,20 @@ export async function persistScreenshotEvidence(
       );
     }
     candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    const selected = candidates[0].file;
+    const dimensions = await pngDimensions(selected);
+    if (
+      dimensions?.width !== EVIDENCE_SCREENSHOT_WIDTH ||
+      dimensions.height !== EVIDENCE_SCREENSHOT_HEIGHT
+    ) {
+      const actual = dimensions ? `${dimensions.width}x${dimensions.height}` : "formato no-PNG";
+      throw new Error(
+        `La captura ${screenshot.fileName} tiene resolución ${actual}; ` +
+          `las evidencias deben generarse a ${EVIDENCE_SCREENSHOT_WIDTH}x${EVIDENCE_SCREENSHOT_HEIGHT} con escala 100%.`
+      );
+    }
     const outputPath = path.join(destination, screenshot.fileName);
-    await fs.copyFile(candidates[0].file, outputPath);
+    await fs.copyFile(selected, outputPath);
     persisted.push(outputPath);
   }
   return persisted;

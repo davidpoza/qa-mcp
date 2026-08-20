@@ -79,7 +79,7 @@ En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `gene
 - `rf` (string, opcional): limita estrictamente todo el ciclo a un único RF, p. ej. `"RF-3"`. Es la opción recomendada para ejecutar una tarea/contexto independiente por RF.
 - `rfFilter` (array de ids, opcional): compatibilidad para limitar a varios RF, p. ej. `["RF-01","RF-03"]`. No se combina con `rf`.
 - `promptOverride` (string, opcional).
-Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar (evita falsos fallos por deriva del baseline). Cada acción definida en `rf-cu.md` genera además una captura explícita con `cy.screenshot()`: `rf1_cu1_01.png`, `rf1_cu1_02.png`, etc. El número de acción siempre usa dos dígitos. Cypress crea el PNG nativo y la tool lo copia a `evidence.output/screenshots`, una ubicación estable que no se borra al ejecutar el siguiente spec. Un CU sólo se considera completamente verde cuando el spec contiene todas las llamadas y existen todas sus capturas; por eso los CU verdes antiguos sin estas evidencias vuelven automáticamente al bucle. El comando de Cypress se puede personalizar con `e2eRunCommand` en `mcp.config.json` (por defecto `npx cypress run`). La tool devuelve un informe acumulado y un extracto de la salida de Cypress para los CU que siguen fallando.
+Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar. Cada acción definida en `rf-cu.md` genera una captura: `rf1_cu1_01.png`, `rf1_cu1_02.png`, etc. El número siempre usa dos dígitos. Todas las evidencias se generan con viewport **1920×1080** y escala/DPR **1 (100 %)**; la tool rechaza cualquier PNG que no mida exactamente 1920×1080. Para Electron el MCP pasa `--force-device-scale-factor=1` mediante la variable oficial `ELECTRON_EXTRA_LAUNCH_ARGS`; para Chrome/Edge usa `before:browser:launch`, y para Firefox fija `layout.css.devPixelsPerPx=1.0`. `cy.viewport()` está prohibido porque sólo cambia píxeles CSS y no normaliza el DPR físico. Cada interacción de UI debe ocupar una acción independiente. Todo input, select/dropdown o checkbox con datos de prueba usa `setDocumentedControl`: establece el dato exacto, espera los re-renderizados, elimina banners conocidos, vuelve a localizar y desplazar el control, verifica el valor/estado real, lo resalta y sólo entonces toma el PNG. En un select la evidencia muestra el texto visible elegido, no el `value` sintético de Angular. Para las demás acciones el spec llama a `cy.screenshot()` después de completarlas. Un CU sólo se considera completamente verde cuando el spec contiene todas las evidencias, existen todos sus PNG a resolución Full HD y los datos del baseline coinciden con `rf-cu.md`; los verdes antiguos se revalidan con cada cambio incompatible.
 
 ### Un contexto por RF
 
@@ -120,6 +120,19 @@ Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no us
 - Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+). Sin sampling, la tool devuelve el prompt para que el agente del cliente genere y escriba `rf-cu.md` (modo asistido; ver arriba).
 - El prompt de instrucciones está externalizado en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP.
 - Si ya existe un `rf-cu.md` parcial, se completa respetando lo ya definido.
+- Cada CU declara obligatoriamente todos los controles con datos de prueba: `<input>`, `<textarea>`, `<select>`/dropdown y checkbox. El bloque canónico contiene clave, tipo, selector CSS, valor exacto y acción. En selects se documenta el texto visible; en checkbox, `true`/`false`. No puede declararse `Ninguno` si el CU selecciona, escribe o marca algún control:
+
+```markdown
+- **CU-1: Cálculo nominal.**
+  - **Valores de controles:**
+    - `sociedad` | tipo `select` | selector `#sociedad` | valor `Org. Ventas de AASA` | acción `02`
+    - `pesoAeronave` | tipo `input` | selector `#pesoAeronave` | valor `180000` | acción `03`
+  1. Acceder al formulario de cálculo.
+  2. Seleccionar `Org. Ventas de AASA` en `#sociedad`.
+  3. Introducir `180000` en `#pesoAeronave`.
+```
+
+Los `rf-cu.md` creados con el contrato anterior —incluidos los que declaraban `Ninguno` aunque seleccionasen dropdowns— deben pasar una vez más por `autoCompleteRfCu`. `generateE2ETests` los rechaza en lugar de producir capturas sin los datos usados. Al cambiar el contrato E2E, los CU verdes anteriores también se revalidan.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
 - asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`
@@ -128,7 +141,7 @@ La generación E2E incluye baseline autocapturable de snapshots genéricos (API/
 - crea `cypress/support/e2e-baseline.js`
 - crea `cypress/fixtures/e2e-baseline.json`; si detecta snapshots contaminados con `[object Event]`, elimina sólo esas entradas, revoca el verde de sus CU y las vuelve a capturar en la siguiente ejecución
 - crea `cypress/support/baseline-tasks.js` con tareas `readBaseline` y `writeBaseline`
-- crea `cypress/support/e2e-helpers.js`: librería compartida y agnóstica de dominio que todos los specs importan (`../support/e2e-helpers`). Incluye `normalizeAmount`, selectores de opciones robustos a controles custom (`resolveNativeSelect`/`getSelectOptions`/`selectFirstSelectableOption`/`selectRequiredOptionByTextOrValue`, que resuelven el `<select>` nativo aunque esté envuelto en un web component como `empresas-ui-dropdown`), y helpers de input que escriben con el setter nativo y emiten `input`/`change` desde la ventana de la aplicación. Así se evita que un evento cross-realm se convierta en `[object Event]`. Los helpers registran todos los inputs manipulados y `persistOrAssertBaseline` los añade automáticamente bajo `inputs`; además rechaza snapshots que contengan eventos serializados. Los specs no deben reimplementar estos helpers ni usar directamente `clear`/`type`/`invoke('val')`/`trigger` para rellenar controles.
+- crea `cypress/support/e2e-helpers.js`: librería compartida que incluye `setDocumentedControl(clave, tipo, selector, valor, captura)`. Para `input` usa el setter nativo y eventos de la ventana AUT, evitando `[object Event]`; para `select` elige y verifica el texto visible exacto aunque Angular use `[ngValue]`; para `checkbox` establece y verifica `true`/`false`. En los tres casos vuelve a resolver el DOM tras el cambio, lleva el control al viewport, lo resalta, genera el PNG y registra el dato bajo `inputs` para compararlo con `rf-cu.md`.
 
 Antes de lanzar Cypress, es necesario ejecutar:
 

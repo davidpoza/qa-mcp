@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext, RfEntry, CuCase } from "../types";
 import { requireFrontendRoot } from "../config";
-import { extractOrBuildRfEntries } from "../rfcu";
+import { extractOrBuildRfEntries, inputActionContractErrors } from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
 import { E2E_CONTRACT_VERSION } from "../e2e-contract";
 import {
@@ -57,10 +57,33 @@ function expandToCuUnits(entries: RfEntry[]): CuUnit[] {
   return units;
 }
 
+function requireRfCuInputActionContract(entries: RfEntry[]): void {
+  const errors = entries.flatMap((rf) =>
+    rf.cases.flatMap((cu) => inputActionContractErrors(rf.id, cu))
+  );
+  if (errors.length === 0) return;
+  throw new Error(
+    "rf-cu.md no permite generar evidencias independientes para todos los controles con datos de prueba:\n- " +
+      errors.join("\n- ") +
+      "\nEjecuta autoCompleteRfCu para declarar input/select/checkbox, separar cada interacción y añadir `acción NN` a cada control."
+  );
+}
+
 /** Valor por defecto del NO_PROXY para entornos internos de AENA. */
 const DEFAULT_E2E_NO_PROXY = "localhost,127.0.0.1,.aena.es";
 /** Directorio de node por defecto (instalación nvm de AENA). */
 const DEFAULT_E2E_NODE_PATH = "C:\\Users\\aena\\AppData\\Roaming\\nvm\\v24.16.0";
+/** Electron no acepta sus switches desde launchOptions.args; Cypress exige esta variable. */
+const ELECTRON_SCALE_ARGUMENT = "--force-device-scale-factor=1";
+
+function requiredElectronLaunchArguments(configured: string | undefined): string {
+  const current = configured?.trim() ?? "";
+  const withoutConflictingScale = current
+    .replace(/(?:^|\s)--force-device-scale-factor(?:=\S+)?(?=\s|$)/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+  return [withoutConflictingScale, ELECTRON_SCALE_ARGUMENT].filter(Boolean).join(" ");
+}
 
 /**
  * Resuelve el directorio de node y las variables de entorno extra para ejecutar
@@ -74,10 +97,14 @@ function resolveE2ERuntime(context: LoadedContext): {
   browser: string | undefined;
 } {
   const nodePath = context.config.e2eNodePath ?? DEFAULT_E2E_NODE_PATH;
+  const configuredEnv = context.config.e2eEnv ?? {};
   const env: Record<string, string> = {
     NO_PROXY: DEFAULT_E2E_NO_PROXY,
     no_proxy: DEFAULT_E2E_NO_PROXY,
-    ...(context.config.e2eEnv ?? {}),
+    ...configuredEnv,
+    ELECTRON_EXTRA_LAUNCH_ARGS: requiredElectronLaunchArguments(
+      configuredEnv.ELECTRON_EXTRA_LAUNCH_ARGS
+    ),
   };
   return {
     nodePath,
@@ -204,6 +231,9 @@ function helperApiSummary(): string {
     "- `setInputValue(inputSelector, value)`: escribe mediante el setter nativo del input y emite `input`/`change` creados por la ventana de la aplicación (AUT), evitando eventos cross-realm. Además registra el valor para incluirlo automáticamente en el baseline.",
     "- `setNumericFieldValue(fieldSelector, value)`: igual para campos numéricos (usa `input:not([type=hidden])`).",
     "- `setValueByFormControl(componentSelector, formControlName, value)`: rellena `[formcontrolname=...] input`.",
+    "- `setDocumentedInput(...)`: implementación especializada de input usada internamente por `setDocumentedControl`; no la llames directamente con el contrato actual.",
+    "- `setDocumentedControl(evidenceKey, controlType, selector, value, screenshotBaseName)`: helper canónico para TODO control declarado en `Valores de controles`. Delega de forma segura en input/select/checkbox, valida el valor/estado visible tras cualquier re-render y genera la captura integrada.",
+    "- `scrollIntoViewForEvidence(rootSelector)`: lleva un elemento al centro útil del viewport y comprueba que queda visible antes de interactuar con él.",
     "- `assertControlEnabled(rootSelector)`: afirma que un control (nativo O custom `empresas-ui-*`) está HABILITADO. Resuelve el `<input>/<select>/<button>` nativo interno; si es un web component sin nativo interno, comprueba ausencia de `disabled`/`aria-disabled`/clase `disabled`. RECIBE UN SELECTOR STRING (nunca un subject/chainable). ÚSALO SIEMPRE en lugar de `.should('be.enabled')` sobre un wrapper custom (el pseudo `:enabled` NO matchea web components y CUELGA).",
     "- `assertControlDisabled(rootSelector)`: idéntico pero afirma DESHABILITADO. RECIBE UN SELECTOR STRING. ÚSALO en vez de `.should('be.disabled')` sobre wrappers custom.",
     "- `getNativeControl(rootSelector)`: devuelve (vía cy.then) el elemento nativo (`input/select/textarea/button`) interno de un control custom, o el propio elemento si ya es nativo. Úsalo para aserciones `have.value`/`have.attr('placeholder')`/`be.enabled` sobre controles `empresas-ui-*`.",
@@ -229,6 +259,8 @@ function referenceSkeleton(): string {
     "  waitForSelectableOptions,",
     "  getSelectOptions,",
     "  setValueByFormControl,",
+    "  setDocumentedControl,",
+    "  scrollIntoViewForEvidence,",
     "  dismissKnownOverlays,",
     "  openAccordionByComponent",
     "} = require(\"../support/e2e-helpers\");",
@@ -505,7 +537,18 @@ function formatCasesForPrompt(entry: RfEntry): string {
   return entry.cases
     .map((cu) => {
       const steps = cu.steps.map((step, index) => `     ${index + 1}. ${step}`).join("\n");
-      return `- ${cu.id}: ${cu.name}\n   Clave baseline: "${entry.id}.${cu.id}"\n   Pasos:\n${steps}`;
+      const inputs = cu.inputValues === undefined
+        ? "   Valores de controles: no declarados (documento legacy; conserva los valores literales que aparezcan en los pasos)."
+        : cu.inputValues.length === 0
+          ? "   Valores de controles: ninguno."
+          : [
+              "   Valores de controles (contrato exacto rf-cu.md ↔ spec ↔ baseline ↔ captura):",
+              ...cu.inputValues.map(
+                (input) =>
+                  `   - clave baseline \`${input.key}\` | tipo \`${input.kind ?? "sin-tipo"}\` | selector \`${input.selector}\` | valor \`${input.value}\` | acción \`${String(input.actionNumber ?? 0).padStart(2, "0")}\``
+              ),
+            ].join("\n");
+      return `- ${cu.id}: ${cu.name}\n   Clave baseline: "${entry.id}.${cu.id}"\n${inputs}\n   Pasos:\n${steps}`;
     })
     .join("\n");
 }
@@ -513,11 +556,17 @@ function formatCasesForPrompt(entry: RfEntry): string {
 function formatScreenshotContract(entry: RfEntry): string {
   return entry.cases
     .flatMap((cu) =>
-      actionScreenshots(entry, cu).map(
-        (screenshot) =>
-          `- Acción ${screenshot.actionIndex + 1} (${screenshot.action}): ` +
-          `\`cy.screenshot("${screenshot.baseName}", { capture: "viewport", overwrite: true });\``
-      )
+      actionScreenshots(entry, cu).map((screenshot) => {
+        const input = cu.inputValues?.find(
+          (candidate) => candidate.actionNumber === screenshot.actionIndex + 1
+        );
+        return input
+          ? `- Acción ${screenshot.actionIndex + 1} (${screenshot.action}): ` +
+              `\`setDocumentedControl(${JSON.stringify(input.key)}, ${JSON.stringify(input.kind)}, ${JSON.stringify(input.selector)}, ${JSON.stringify(input.value)}, ${JSON.stringify(screenshot.baseName)});\` ` +
+              "(la captura está integrada en el helper; NO añadas otro cy.screenshot para esta acción)"
+          : `- Acción ${screenshot.actionIndex + 1} (${screenshot.action}): ` +
+              `\`cy.screenshot("${screenshot.baseName}", { capture: "viewport", overwrite: true });\``;
+      })
     )
     .join("\n");
 }
@@ -571,16 +620,20 @@ function buildE2EGenerationPrompt(params: {
     "- Reutiliza los helpers compartidos importándolos de `../support/e2e-helpers` (NO reimplementes utilidades):",
     helperApiSummary(),
     "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un ÚNICO `it` para el CU de ESTE fichero (cada CU vive en su propio spec; NO añadas otros CU ni `it` adicionales). Nombre del `it`: `\"<CU-id> <nombre>\"`, en español.",
-    "- **EVIDENCIAS POR ACCIÓN (OBLIGATORIO)**: inmediatamente DESPUÉS de completar y verificar cada acción numerada del CU, añade su llamada exacta a `cy.screenshot`. Debe existir UNA captura por acción, en el mismo orden; no las agrupes al final ni captures antes de que la acción sea visible y estable. No añadas extensión: Cypress genera el `.png` nativo. Usa siempre `{ capture: \"viewport\", overwrite: true }`.",
+    "- **EVIDENCIAS DOCUMENTALES POR ACCIÓN (OBLIGATORIO)**: debe existir UNA captura por cada acción numerada, en el mismo orden, y la imagen debe demostrar visualmente la acción descrita. Toda acción asociada a `Valores de controles` usa la llamada exacta `setDocumentedControl(clave, tipo, selector, valor, screenshotBaseName)`: para input, select/dropdown y checkbox el helper espera cualquier re-render, vuelve a llevar el control al viewport, comprueba el valor/estado DOM, lo resalta y captura el dato visible. NO añadas un segundo screenshot. Para acciones sin control documentado, llama a `cy.screenshot` inmediatamente después de completar/verificar la acción. No agrupes interacciones ni capturas al final. No añadas extensión: Cypress genera el `.png` nativo.",
+    "- **RESOLUCIÓN DE EVIDENCIAS**: el proyecto queda configurado a 1920x1080 con escala/DPR 1 (100 %). NO uses nunca `cy.viewport()` ni cambies el zoom: cy.viewport sólo cambia píxeles CSS y NO corrige el DPR físico. Electron recibe el switch mediante ELECTRON_EXTRA_LAUNCH_ARGS; el servidor rechazará cualquier PNG cuyo tamaño físico no sea exactamente 1920x1080.",
+    "- **VIEWPORT ANTES DE TODA INTERACCIÓN (OBLIGATORIO)**: antes de click/select/escritura/check sobre CUALQUIER elemento de UI, ese elemento debe entrar en el viewport. Los helpers compartidos de inputs, selects, botones y acordeones ya hacen scroll internamente. Para cualquier interacción Cypress directa, llama antes a `scrollIntoViewForEvidence('<selector>')` o encadena `.scrollIntoView({ duration: 0, offset: { top: -100, left: 0 } }).should('be.visible')`. Esto es especialmente obligatorio antes de expandir un acordeón. La captura de la acción se toma DESPUÉS, mientras el control accionado sigue en el viewport.",
     "- Nombres exactos de las capturas requeridas para este CU:",
     formatScreenshotContract(entry),
     "- **REGLA CRÍTICA DE SELECTORES**: usa ÚNICAMENTE selectores que aparezcan LITERALMENTE en el código frontend proporcionado (busca `id=\"...\"`, `formcontrolname=\"...\"`, tags de componentes `app-*`/`empresas-ui-*`, clases CSS, `data-*`, y textos exactos de botones). PROHIBIDO inventar selectores a partir del `operationId` o de nombres en inglés del OpenAPI. Si el endpoint es `get-salesOrganizations` pero en el HTML el control es `id=\"sociedad\"`, DEBES usar `#sociedad`, nunca `[formcontrolname='salesOrganization']`.",
     "- Antes de escribir cada selector, localízalo en el bloque de código frontend. Si un campo/desplegable no existe con ese nombre, busca el equivalente real (a menudo en español) en las plantillas.",
     "- **CONTROLES CUSTOM (MUY IMPORTANTE)**: muchos controles son web components que envuelven un elemento nativo (p. ej. `<empresas-ui-dropdown id=\"sociedad\">` contiene un `<select>` nativo, `<empresas-ui-input>` contiene un `<input>`). NUNCA llames `.select()` ni `.find('option')` directamente sobre el wrapper custom: fallará (`cy.select() can only be called on a <select>`). En su lugar:",
-    "   - Para desplegables usa SIEMPRE los helpers pasando el selector del contenedor (`selectFirstSelectableOption('#sociedad')`, `selectRequiredOptionByTextOrValue('#sociedad', 'AASA')`); resuelven el `<select>` nativo internamente.",
+    "   - Para desplegables con dato declarado usa SIEMPRE `setDocumentedControl(clave, 'select', selector, textoVisibleExacto, captura)`. Sólo para documentos legacy se permiten `selectFirstSelectableOption('#sociedad')` y `selectRequiredOptionByTextOrValue('#sociedad', 'texto')`.",
     "   - Para LEER opciones en escenarios NOMINALES (afirmar que HAY opciones) usa `waitForSelectableOptions('#sociedad').then((opts) => { ... })`, que ESPERA a que se rellenen (son asíncronas). NO uses `getSelectOptions` para eso: leería 0 antes de que Angular renderice las `<option>`.",
     "   - Para LEER opciones en escenarios VACÍOS/negativos usa `getSelectOptions('#sociedad').then((opts) => { ... })`. NUNCA uses `cy.get('#sociedad').find('option')` porque `.find` reintenta hasta que exista una opción y COLGARÁ el test en escenarios vacíos.",
-    "   - Para CUALQUIER input usa exclusivamente `setInputValue`/`setNumericFieldValue`/`setValueByFormControl`. Resuelven el `<input>` interno, usan su setter nativo y crean `input`/`change` con `input.ownerDocument.defaultView.Event` (la misma ventana que la aplicación).",
+    "   - Para CUALQUIER control declarado usa exclusivamente `setDocumentedControl`; sólo para documentos legacy sin bloque canónico se permiten `setDocumentedInput`, `setInputValue`/`setNumericFieldValue`/`setValueByFormControl` y los helpers legacy de selects. La rama input resuelve el `<input>` interno, usa su setter nativo y crea `input`/`change` con `input.ownerDocument.defaultView.Event` (la misma ventana que la aplicación).",
+    "   - Si rf-cu.md declara `Valores de controles`, usa EXCLUSIVAMENTE la llamada literal de CINCO argumentos indicada en el contrato de capturas: `setDocumentedControl('<clave-baseline>', '<input|select|checkbox>', '<selector>', '<valor>', '<rfx_cuy_NN>')`. Todo coincide CARÁCTER A CARÁCTER con rf-cu.md. En selects, el valor es el TEXTO VISIBLE exacto; en checkbox, `true`/`false`. No uses constantes, valores calculados ni helpers alternativos. El servidor comprueba spec, baseline y evidencia.",
+    "- **UNA INTERACCIÓN POR ACCIÓN/CAPTURA**: está prohibido ejecutar dos escrituras, selecciones, clicks o aperturas de acordeón antes de la misma evidencia. Cada interacción indicada en rf-cu.md se implementa y captura por separado; en particular, cada input o dropdown usa su propia llamada setDocumentedControl y su propia acción.",
     "   - **PROHIBIDO reimplementar helpers locales de escritura o usar `clear()`/`type()`/`invoke('val')`/`trigger('input'/'change')` directamente (CORRUPCIÓN `[object Event]`)**: Cypress puede crear esos eventos en una ventana distinta de la aplicación; entonces una comprobación Angular `value instanceof Event` falla y el componente guarda el objeto Event como valor. Importa y usa exclusivamente los helpers compartidos.",
     "   - **ASERCIONES enabled/disabled SOBRE CONTROLES CUSTOM (CAUSA FRECUENTE DE FALLO)**: NUNCA hagas `.should('be.enabled')`/`.should('be.disabled')` directamente sobre un wrapper `empresas-ui-*` (`#pesoAeronave`, `empresas-ui-button`, ...). El pseudo-selector jQuery `:enabled`/`:disabled` SOLO matchea controles nativos (`input/select/textarea/button`), así que sobre un web component NUNCA matchea y el test AGOTA el timeout (`expected '<empresas-ui-input#pesoAeronave...>' to be 'enabled'`). Usa SIEMPRE `assertControlEnabled('#pesoAeronave')` / `assertControlDisabled('#selector')` (resuelven el nativo interno o comprueban `disabled`/`aria-disabled`/clase). Para `have.value`/`have.attr('placeholder')` sobre un control custom, usa `getNativeControl('#id').should('have.attr','placeholder', ...)`, no el wrapper.",
     "   - **NO ASUMAS QUE UN BOTÓN DE ACCIÓN SE DESHABILITA POR UNA VALIDACIÓN/SELECCIÓN INCOMPLETA (CAUSA FRECUENTE DE FALLO)**: en un CU de validación negativa NO stubeado (p. ej. \"seleccionar sociedad pero NO aeropuerto → el botón Descargar está deshabilitado\"), NO des por hecho que el botón queda `disabled`. Muchos botones permanecen HABILITADOS y la validación se manifiesta de OTRA forma (mensaje de error, atributo `viewValidation`/`ng-invalid`/clase de error en el campo, o error al pulsar). Antes de afirmar `assertUiButtonDisabled(...)`: (1) LOCALIZA en la plantilla el binding `[disabled]=\"...\"` (o `[isDisabled]`) del botón y comprueba de qué depende REALMENTE; si NO depende del control que dejaste incompleto (o no existe tal binding), NO afirmes `disabled` (fallarías con `expected false to equal true`). (2) En su lugar, afirma el INDICADOR DE ERROR real que el código renderiza para ese campo (p. ej. `cy.get('#selectAirport').should('have.attr','viewValidation')` / clase de error / mensaje literal presente en el HTML). (3) Mantén la INTENCIÓN del CU (verificar el escenario inválido) pero adáptala al comportamiento REAL observable del código, sin inventar `disabled` ni mensajes que no existan. Regla equivalente para HABILITAR: no asumas que un botón se habilita solo por rellenar un campo si el `[disabled]` depende de más condiciones.",
@@ -642,6 +695,8 @@ function buildE2EGenerationPrompt(params: {
           "- Corrige la causa REAL del fallo aplicando TODAS las reglas de arriba (selectores literales del código, controles custom, valores sintéticos `[ngValue]`, esperar opciones asíncronas con `waitForSelectableOptions`, CU de error = acción mínima + `cy.url().should('include','/error')` + PARAR, no afirmar recuentos exactos de opciones, no tocar controles no afectados, etc.).",
           "- Si un `it()` YA pasaba, NO cambies su lógica salvo que sea imprescindible; céntrate en los que fallan.",
           "- No elimines Casos de Uso ni los conviertas en `it.skip`. Todos deben quedar ejecutables y en verde.",
+          "- Conserva exactamente las llamadas `setDocumentedControl` de cinco argumentos exigidas por rf-cu.md (clave, tipo, selector, valor, captura y orden); cada una genera la evidencia de SU control después de verificar el dato visible.",
+          "- Antes de toda interacción de UI conserva o añade el scroll al viewport; `openAccordionByComponent` ya desplaza el encabezado del acordeón antes de abrirlo.",
           "- Conserva o restaura TODAS las llamadas `cy.screenshot` obligatorias, cada una inmediatamente después de su acción correspondiente.",
         ].join("\n")
       : "",
@@ -827,6 +882,7 @@ function buildE2EHelpersFile(): string {
     "} = require('./e2e-baseline');",
     "",
     "const DEFAULT_BASELINE_FIXTURE = 'cypress/fixtures/e2e-baseline.json';",
+    "const EVIDENCE_SCROLL_OPTIONS = { duration: 0, offset: { top: -100, left: 0 } };",
     "",
     "// Los tests E2E corren contra una app real cargada de SDKs de terceros (Gigya, cookies, analitica).",
     "// Esos scripts cross-origin lanzan excepciones no capturadas ('Script error.') ajenas a lo que probamos.",
@@ -909,7 +965,7 @@ function buildE2EHelpersFile(): string {
     "}",
     "",
     "function selectRequiredOptionByTextOrValue(rootSelector, expectedTextOrValue) {",
-    "  resolveNativeSelect(rootSelector).then(($select) => {",
+    "  scrollIntoViewForEvidence(rootSelector).then(() => resolveNativeSelect(rootSelector)).then(($select) => {",
     "    cy.wrap($select)",
     "      .find('option', { timeout: 10000 })",
     "      .should(($options) => {",
@@ -923,7 +979,7 @@ function buildE2EHelpersFile(): string {
     "}",
     "",
     "function selectOptionByTextOrValueIfPresent(rootSelector, expectedTextOrValue) {",
-    "  resolveNativeSelect(rootSelector).then(($select) => {",
+    "  scrollIntoViewForEvidence(rootSelector).then(() => resolveNativeSelect(rootSelector)).then(($select) => {",
     "    const match = findMatchingOption($select.find('option'), expectedTextOrValue);",
     "    if (!match) return;",
     "    cy.wrap($select).select(match.value || (match.textContent || '').trim(), { force: true });",
@@ -931,7 +987,7 @@ function buildE2EHelpersFile(): string {
     "}",
     "",
     "function selectFirstSelectableOption(rootSelector) {",
-    "  resolveNativeSelect(rootSelector).then(($select) => {",
+    "  scrollIntoViewForEvidence(rootSelector).then(() => resolveNativeSelect(rootSelector)).then(($select) => {",
     "    cy.wrap($select)",
     "      .find('option', { timeout: 10000 })",
     "      .should('have.length.greaterThan', 0)",
@@ -951,6 +1007,14 @@ function buildE2EHelpersFile(): string {
     "  Cypress.on('test:before:run', () => {",
     "    Object.keys(trackedInputValues).forEach((key) => delete trackedInputValues[key]);",
     "  });",
+    "}",
+    "",
+    "function scrollIntoViewForEvidence(rootSelector) {",
+    "  return cy",
+    "    .get(rootSelector, { timeout: 10000 })",
+    "    .first()",
+    "    .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "    .should('be.visible');",
     "}",
     "",
     "function inputEvidenceKey(inputSelector, nativeInput, explicitKey) {",
@@ -983,6 +1047,8 @@ function buildE2EHelpersFile(): string {
     "  const valueAsText = String(value);",
     "  return cy.get(inputSelector, { timeout: 10000 })",
     "    .first()",
+    "    .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "    .should('be.visible')",
     "    .then(($input) => {",
     "      const nativeInput = $input[0];",
     "      if (!nativeInput || !/^(INPUT|TEXTAREA)$/.test(nativeInput.tagName)) {",
@@ -998,6 +1064,169 @@ function buildE2EHelpersFile(): string {
     "          trackedInputValues[key] = String(verifiedInput.value);",
     "        });",
     "    });",
+    "}",
+    "",
+    "function resolveDocumentedNativeInput($root, inputSelector) {",
+    "  const $visibleNative = $root",
+    "    .find('input:not([type=hidden]), textarea')",
+    "    .filter(':visible')",
+    "    .first();",
+    "  const $native = $root.is('input:not([type=hidden]), textarea')",
+    "    ? $root",
+    "    : ($visibleNative.length ? $visibleNative : $root.find('input:not([type=hidden]), textarea').first());",
+    "  const nativeInput = $native[0];",
+    "  if (!nativeInput || !/^(INPUT|TEXTAREA)$/.test(nativeInput.tagName)) {",
+    "    throw new Error(`El selector documentado \"${inputSelector}\" no contiene un input/textarea nativo.`);",
+    "  }",
+    "  return $native;",
+    "}",
+    "",
+    "function waitForApplicationPaint() {",
+    "  return cy.window({ log: false }).then((appWindow) =>",
+    "    new Cypress.Promise((resolve) => {",
+    "      appWindow.requestAnimationFrame(() => appWindow.requestAnimationFrame(resolve));",
+    "    })",
+    "  );",
+    "}",
+    "",
+    "function highlightInputForEvidence(rootElement) {",
+    "  const previousOutline = rootElement.style.getPropertyValue('outline');",
+    "  const previousOutlinePriority = rootElement.style.getPropertyPriority('outline');",
+    "  const previousOffset = rootElement.style.getPropertyValue('outline-offset');",
+    "  const previousOffsetPriority = rootElement.style.getPropertyPriority('outline-offset');",
+    "  rootElement.style.setProperty('outline', '3px solid #7ab800', 'important');",
+    "  rootElement.style.setProperty('outline-offset', '4px', 'important');",
+    "  return () => {",
+    "    if (previousOutline) rootElement.style.setProperty('outline', previousOutline, previousOutlinePriority);",
+    "    else rootElement.style.removeProperty('outline');",
+    "    if (previousOffset) rootElement.style.setProperty('outline-offset', previousOffset, previousOffsetPriority);",
+    "    else rootElement.style.removeProperty('outline-offset');",
+    "  };",
+    "}",
+    "",
+    "function setDocumentedInput(evidenceKey, inputSelector, value, screenshotBaseName) {",
+    "  if (!evidenceKey || !inputSelector || !screenshotBaseName) {",
+    "    throw new Error('setDocumentedInput requiere clave, selector y nombre de captura no vacíos.');",
+    "  }",
+    "  const valueAsText = String(value);",
+    "  return scrollIntoViewForEvidence(inputSelector).then(($root) => {",
+    "    const $native = resolveDocumentedNativeInput($root, inputSelector);",
+    "    const nativeInput = $native[0];",
+    "    setNativeInputValue(nativeInput, valueAsText);",
+    "  })",
+    "    // El blur puede provocar un re-render de Angular y cambiar el scroll. Esperamos",
+    "    // al repintado y resolvemos el control DE NUEVO; no reutilizamos el nodo anterior.",
+    "    .then(() => waitForApplicationPaint())",
+    "    .then(() => dismissKnownOverlays())",
+    "    .then(() => cy.get(inputSelector, { timeout: 10000 }).first())",
+    "    .then(($freshRoot) => {",
+    "      const $freshNative = resolveDocumentedNativeInput($freshRoot, inputSelector);",
+    "      return cy.wrap($freshNative, { log: false })",
+    "        .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "        .should('be.visible')",
+    "        .and('have.value', valueAsText)",
+    "        .then(($verifiedInput) => {",
+    "          trackedInputValues[evidenceKey] = String($verifiedInput[0].value);",
+    "          return waitForApplicationPaint()",
+    "            .then(() => cy.get(inputSelector, { timeout: 10000 }).first())",
+    "            .then(($evidenceRoot) => {",
+    "              const $evidenceInput = resolveDocumentedNativeInput($evidenceRoot, inputSelector);",
+    "              return cy.wrap($evidenceInput, { log: false })",
+    "                .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "                .should('be.visible')",
+    "                .and('have.value', valueAsText)",
+    "                .then(($evidenceInput) => {",
+    "                  const cleanupHighlight = highlightInputForEvidence($evidenceInput[0]);",
+    "                  return waitForApplicationPaint()",
+    "                    .then(() => cy.screenshot(screenshotBaseName, { capture: 'viewport', overwrite: true }))",
+    "                    .then(() => cleanupHighlight());",
+    "                });",
+    "            });",
+    "        });",
+    "    });",
+    "}",
+    "",
+    "function setDocumentedSelect(evidenceKey, rootSelector, expectedText, screenshotBaseName) {",
+    "  const expected = String(expectedText).trim();",
+    "  return scrollIntoViewForEvidence(rootSelector)",
+    "    .then(() => resolveNativeSelect(rootSelector))",
+    "    .then(($select) => {",
+    "      return cy.wrap($select)",
+    "        .find('option', { timeout: 10000 })",
+    "        .should(($options) => {",
+    "          expect(findMatchingOption($options, expected), `opción visible exacta \"${expected}\"`).to.exist;",
+    "        })",
+    "        .then(($options) => {",
+    "          const match = findMatchingOption($options, expected);",
+    "          return cy.wrap($select).select(match.value || (match.textContent || '').trim(), { force: true });",
+    "        });",
+    "    })",
+    "    .then(() => waitForApplicationPaint())",
+    "    .then(() => dismissKnownOverlays())",
+    "    .then(() => scrollIntoViewForEvidence(rootSelector))",
+    "    .then(($evidenceRoot) => {",
+    "      return resolveNativeSelect(rootSelector).then(($select) => {",
+    "        const selectedText = ($select.find('option:selected').text() || '').replace(/\\s+/g, ' ').trim();",
+    "        expect(selectedText, `texto seleccionado visible en ${rootSelector}`).to.eq(expected);",
+    "        trackedInputValues[evidenceKey] = selectedText;",
+    "        const cleanupHighlight = highlightInputForEvidence($evidenceRoot[0]);",
+    "        return waitForApplicationPaint()",
+    "          .then(() => scrollIntoViewForEvidence(rootSelector))",
+    "          .then(() => cy.screenshot(screenshotBaseName, { capture: 'viewport', overwrite: true }))",
+    "          .then(() => cleanupHighlight());",
+    "      });",
+    "    });",
+    "}",
+    "",
+    "function resolveDocumentedCheckbox($root, rootSelector) {",
+    "  const $checkbox = $root.is('input[type=checkbox], input[type=radio]')",
+    "    ? $root",
+    "    : $root.find('input[type=checkbox], input[type=radio]').first();",
+    "  if ($checkbox.length === 0) {",
+    "    throw new Error(`El selector documentado \"${rootSelector}\" no contiene checkbox/radio nativo.`);",
+    "  }",
+    "  return $checkbox;",
+    "}",
+    "",
+    "function setDocumentedCheckbox(evidenceKey, rootSelector, expectedValue, screenshotBaseName) {",
+    "  const normalized = String(expectedValue).trim().toLowerCase();",
+    "  if (normalized !== 'true' && normalized !== 'false') {",
+    "    throw new Error('El valor documentado de checkbox debe ser true o false.');",
+    "  }",
+    "  const shouldBeChecked = normalized === 'true';",
+    "  return scrollIntoViewForEvidence(rootSelector)",
+    "    .then(($root) => {",
+    "      const $checkbox = resolveDocumentedCheckbox($root, rootSelector);",
+    "      return shouldBeChecked",
+    "        ? cy.wrap($checkbox).check({ force: true })",
+    "        : cy.wrap($checkbox).uncheck({ force: true });",
+    "    })",
+    "    .then(() => waitForApplicationPaint())",
+    "    .then(() => dismissKnownOverlays())",
+    "    .then(() => scrollIntoViewForEvidence(rootSelector))",
+    "    .then(($evidenceRoot) => {",
+    "      const $checkbox = resolveDocumentedCheckbox($evidenceRoot, rootSelector);",
+    "      return cy.wrap($checkbox)",
+    "        .should(shouldBeChecked ? 'be.checked' : 'not.be.checked')",
+    "        .then(($verifiedCheckbox) => {",
+    "          trackedInputValues[evidenceKey] = String(Boolean($verifiedCheckbox[0].checked));",
+    "          const cleanupHighlight = highlightInputForEvidence($evidenceRoot[0]);",
+    "          return waitForApplicationPaint()",
+    "            .then(() => scrollIntoViewForEvidence(rootSelector))",
+    "            .then(() => cy.screenshot(screenshotBaseName, { capture: 'viewport', overwrite: true }))",
+    "            .then(() => cleanupHighlight());",
+    "        });",
+    "    });",
+    "}",
+    "",
+    "function setDocumentedControl(evidenceKey, controlType, selector, value, screenshotBaseName) {",
+    "  if (!evidenceKey || !controlType || !selector || !screenshotBaseName) {",
+    "    throw new Error('setDocumentedControl requiere clave, tipo, selector y captura no vacíos.');",
+    "  }",
+    "  if (controlType === 'input') return setDocumentedInput(evidenceKey, selector, value, screenshotBaseName);",
+    "  if (controlType === 'select') return setDocumentedSelect(evidenceKey, selector, value, screenshotBaseName);",
+    "  if (controlType === 'checkbox') return setDocumentedCheckbox(evidenceKey, selector, value, screenshotBaseName);",
+    "  throw new Error(`Tipo de control documentado no soportado: ${controlType}`);",
     "}",
     "",
     "function setNumericFieldValue(fieldSelector, value) {",
@@ -1098,7 +1327,8 @@ function buildE2EHelpersFile(): string {
     "function findUiButtonByLabel(labelOrText) {",
     "  return cy",
     "    .get('empresas-ui-button, button, [role=\"button\"]', { timeout: 10000 })",
-    "    .then(($els) => $els.filter((i, el) => matchesButtonLabel(el, labelOrText)).first());",
+    "    .then(($els) => $els.filter((i, el) => matchesButtonLabel(el, labelOrText)).first())",
+    "    .then(($match) => cy.wrap($match).scrollIntoView(EVIDENCE_SCROLL_OPTIONS).should('be.visible'));",
     "}",
     "",
     "function assertUiButtonDisabled(labelOrText) {",
@@ -1124,12 +1354,27 @@ function buildE2EHelpersFile(): string {
     "    \"button[title='Aceptar']\",",
     "    ...extraSelectors",
     "  ];",
-    "  cy.get('body').then(($body) => {",
-    "    knownButtons.forEach((selector) => {",
-    "      if ($body.find(selector).length > 0) {",
-    "        cy.get(selector).first().click({ force: true });",
+    "  return cy.get('body').then(($body) => {",
+    "    let $consentButton = Cypress.$();",
+    "    for (const selector of knownButtons) {",
+    "      const $candidate = $body.find(selector).filter(':visible').first();",
+    "      if ($candidate.length > 0) {",
+    "        $consentButton = $candidate;",
+    "        break;",
     "      }",
-    "    });",
+    "    }",
+    "    const consentText = /^(?:rechazar todas|reject all|aceptar todas|accept all)$/i;",
+    "    if ($consentButton.length === 0) {",
+    "      $consentButton = $body",
+    "        .find('button, [role=\"button\"], empresas-ui-button')",
+    "        .filter((index, element) => consentText.test((element.textContent || '').replace(/\\s+/g, ' ').trim()))",
+    "        .filter(':visible')",
+    "        .first();",
+    "    }",
+    "    if ($consentButton.length > 0) {",
+    "      return cy.wrap($consentButton).scrollIntoView(EVIDENCE_SCROLL_OPTIONS).click({ force: true });",
+    "    }",
+    "    return undefined;",
     "  });",
     "}",
     "",
@@ -1142,7 +1387,10 @@ function buildE2EHelpersFile(): string {
     "        .find('.card-header, .accordion-header, mat-expansion-panel-header')",
     "        .first();",
     "      if (header && header.length > 0) {",
-    "        cy.wrap(header).click({ force: true });",
+    "        cy.wrap(header)",
+    "          .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "          .should('be.visible')",
+    "          .click({ force: true });",
     "      }",
     "    });",
     "}",
@@ -1236,6 +1484,9 @@ function buildE2EHelpersFile(): string {
     "  setInputValue,",
     "  setNumericFieldValue,",
     "  setValueByFormControl,",
+    "  setDocumentedInput,",
+    "  setDocumentedControl,",
+    "  scrollIntoViewForEvidence,",
     "  getNativeControl,",
     "  assertControlEnabled,",
     "  assertControlDisabled,",
@@ -1294,9 +1545,24 @@ function buildDefaultCypressConfigFileWithBaseUrl(baseUrl?: string): string {
     "module.exports = defineConfig({",
     "  e2e: {",
     "    specPattern: \"cypress/e2e/**/*.cy.js\",",
+    "    viewportWidth: 1920,",
+    "    viewportHeight: 1080,",
     ...(baseUrl ? [`    baseUrl: \"${baseUrl.replace(/"/g, '\\"')}\",`] : []),
     "    setupNodeEvents(on) {",
     "      registerBaselineTasks(on);",
+    "      on(\"before:browser:launch\", (browser, launchOptions) => {",
+    "        if (browser.family === \"chromium\" && browser.name !== \"electron\") {",
+    "          launchOptions.args = launchOptions.args || [];",
+    "          if (!launchOptions.args.includes(\"--force-device-scale-factor=1\")) {",
+    "            launchOptions.args.push(\"--force-device-scale-factor=1\");",
+    "          }",
+    "        }",
+    "        if (browser.family === \"firefox\") {",
+    "          launchOptions.preferences = launchOptions.preferences || {};",
+    "          launchOptions.preferences[\"layout.css.devPixelsPerPx\"] = \"1.0\";",
+    "        }",
+    "        return launchOptions;",
+    "      });",
     "    }",
     "  },",
     "  screenshotsFolder: \"cypress/screenshots\",",
@@ -1336,6 +1602,55 @@ function injectBaselineTasksIntoConfig(configContent: string): string {
   }
 
   return updated;
+}
+
+/**
+ * Fija el formato documental de las evidencias: viewport Full HD y DPR 1.
+ * Se aplica también a configuraciones existentes para que el escalado DPI del
+ * sistema operativo no produzca PNG con dimensiones distintas de 1920x1080.
+ */
+function injectEvidenceDisplayIntoConfig(configContent: string): string {
+  let updated = configContent;
+  const e2eStart = /\be2e\s*:\s*\{/;
+
+  // Cypress ignora launchOptions.args para su Electron empaquetado. Migra el
+  // hook que generaban versiones anteriores para reservarlo a Chrome/Edge;
+  // Electron recibe el mismo switch mediante ELECTRON_EXTRA_LAUNCH_ARGS.
+  updated = updated.replace(
+    /browser\.family\s*===\s*(["'])chromium\1\s*\)/g,
+    (_match, quote: string) =>
+      `browser.family === ${quote}chromium${quote} && browser.name !== ${quote}electron${quote})`
+  );
+
+  if (/\bviewportWidth\s*:\s*\d+/.test(updated)) {
+    updated = updated.replace(/\bviewportWidth\s*:\s*\d+/, "viewportWidth: 1920");
+  } else {
+    updated = updated.replace(e2eStart, (match) => `${match}\n    viewportWidth: 1920,`);
+  }
+  if (/\bviewportHeight\s*:\s*\d+/.test(updated)) {
+    updated = updated.replace(/\bviewportHeight\s*:\s*\d+/, "viewportHeight: 1080");
+  } else {
+    updated = updated.replace(e2eStart, (match) => `${match}\n    viewportHeight: 1080,`);
+  }
+
+  if (updated.includes("--force-device-scale-factor=1")) return updated;
+  const setupNodeEventsRegex = /setupNodeEvents\s*\(\s*on(?:\s*,[^)]*)?\s*\)\s*\{/;
+  const launchHook = [
+    '      on("before:browser:launch", (browser, launchOptions) => {',
+    '        if (browser.family === "chromium" && browser.name !== "electron") {',
+    "          launchOptions.args = launchOptions.args || [];",
+    '          if (!launchOptions.args.includes("--force-device-scale-factor=1")) {',
+    '            launchOptions.args.push("--force-device-scale-factor=1");',
+    "          }",
+    "        }",
+    '        if (browser.family === "firefox") {',
+    "          launchOptions.preferences = launchOptions.preferences || {};",
+    '          launchOptions.preferences["layout.css.devPixelsPerPx"] = "1.0";',
+    "        }",
+    "        return launchOptions;",
+    "      });",
+  ].join("\n");
+  return updated.replace(setupNodeEventsRegex, (match) => `${match}\n${launchHook}`);
 }
 
 async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void> {
@@ -1384,7 +1699,9 @@ async function ensureFrontendCypressSetup(context: LoadedContext): Promise<void>
     return;
   }
 
-  const updatedConfig = injectBaselineTasksIntoConfig(existingConfig);
+  const updatedConfig = injectEvidenceDisplayIntoConfig(
+    injectBaselineTasksIntoConfig(existingConfig)
+  );
   if (updatedConfig !== existingConfig) {
     await fs.writeFile(cypressConfigPath, updatedConfig, "utf8");
   }
@@ -1536,7 +1853,13 @@ async function inspectCuArtifacts(
 ): Promise<CuArtifactState> {
   const spec = await readTextIfExists(fullPath);
   const missingCalls = spec ? missingScreenshotCalls(spec, unit.rf, unit.cu) : actionScreenshots(unit.rf, unit.cu);
-  const contractError = spec ? specContractError(unit, spec) : undefined;
+  const specError = spec ? specContractError(unit, spec) : undefined;
+  const baselineError = spec && isRfGreen(status, unit.unitId)
+    ? await documentedInputBaselineError(context, unit)
+    : undefined;
+  const contractError = [specError, baselineError]
+    .filter((error): error is string => Boolean(error))
+    .join("\n") || undefined;
   const evidenceReady = spec
     ? await hasAllScreenshotEvidence(context, unit.rf, unit.cu)
     : false;
@@ -1557,20 +1880,25 @@ function screenshotContractError(unit: CuUnit, spec: string): string | undefined
   const missing = missingScreenshotCalls(spec, unit.rf, unit.cu);
   if (missing.length === 0) return undefined;
   return (
-    `CONTRATO DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: faltan las llamadas ` +
-    missing.map((item) => `cy.screenshot(\"${item.baseName}\", ...)`).join(", ") +
-    ". Debe haber una captura inmediatamente después de cada acción de rf-cu.md."
+    `CONTRATO DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: faltan las evidencias ` +
+    missing.map((item) => item.baseName).join(", ") +
+    ". Las acciones con datos de control las captura setDocumentedControl con su quinto argumento; " +
+    "las demás usan cy.screenshot inmediatamente después de la acción."
   );
 }
 
-function inputInteractionContractError(unit: CuUnit, spec: string): string | undefined {
-  const executableSpec = spec
+function executableSpecContent(spec: string): string {
+  return spec
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split(/\r?\n/)
     .filter((line) => !/^\s*\/\//.test(line))
     .join("\n");
+}
+
+function inputInteractionContractError(unit: CuUnit, spec: string): string | undefined {
+  const executableSpec = executableSpecContent(spec);
   const violations: string[] = [];
-  if (/\bfunction\s+(?:fillNumericInput|fillInput|setInputValue|setNumericFieldValue|setValueByFormControl)\s*\(/.test(executableSpec)) {
+  if (/\bfunction\s+(?:fillNumericInput|fillInput|setInputValue|setNumericFieldValue|setValueByFormControl|setDocumentedInput|setDocumentedControl)\s*\(/.test(executableSpec)) {
     violations.push("define un helper local de escritura");
   }
   if (/\.clear\s*\(/.test(executableSpec) || /\.type\s*\(/.test(executableSpec)) {
@@ -1585,13 +1913,332 @@ function inputInteractionContractError(unit: CuUnit, spec: string): string | und
   if (violations.length === 0) return undefined;
   return (
     `CONTRATO DE INPUTS INCUMPLIDO para ${unit.unitId}: ${violations.join(", ")}. ` +
-    "El spec debe importar y usar exclusivamente setInputValue/setNumericFieldValue/" +
-    "setValueByFormControl; esos helpers emiten eventos desde la ventana AUT y registran los inputs del baseline."
+    "El spec debe importar y usar exclusivamente setDocumentedControl o, para documentos legacy, " +
+    "setInputValue/setNumericFieldValue/setValueByFormControl; esos helpers emiten eventos desde la ventana AUT " +
+    "y registran los inputs del baseline."
+  );
+}
+
+function viewportInteractionContractError(unit: CuUnit, spec: string): string | undefined {
+  const statements = executableSpecContent(spec)
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  const interaction = /\.(?:click|dblclick|rightclick|select|check|uncheck|focus|blur|trigger|submit)\s*\(/;
+  const violations: string[] = [];
+
+  statements.forEach((statement, index) => {
+    if (!interaction.test(statement)) return;
+    const previous = statements[index - 1] ?? "";
+    const scrollsCurrentTarget =
+      /\.scrollIntoView\s*\(/.test(statement) ||
+      /\bscrollIntoViewForEvidence\s*\(/.test(statement) ||
+      /\bfindUiButtonByLabel\s*\(/.test(statement);
+    const explicitPreviousScroll = /\bscrollIntoViewForEvidence\s*\(/.test(previous);
+    const nonElementInteraction = /\bcy\.(?:window|document)\s*\(/.test(statement);
+    if (!scrollsCurrentTarget && !explicitPreviousScroll && !nonElementInteraction) {
+      violations.push(statement.replace(/\s+/g, " ").slice(0, 180));
+    }
+  });
+
+  if (violations.length === 0) return undefined;
+  return (
+    `CONTRATO DE VIEWPORT INCUMPLIDO para ${unit.unitId}: hay interacciones sin scroll previo: ` +
+    violations.map((statement) => `\`${statement}\``).join(", ") +
+    ". Usa un helper compartido que haga scroll, scrollIntoViewForEvidence(selector) inmediatamente antes, " +
+    "o encadena .scrollIntoView(...).should('be.visible') antes de interactuar."
+  );
+}
+
+function evidenceDisplayContractError(unit: CuUnit, spec: string): string | undefined {
+  if (!/\bcy\s*\.\s*viewport\s*\(/.test(executableSpecContent(spec))) return undefined;
+  return (
+    `CONTRATO DE RESOLUCIÓN INCUMPLIDO para ${unit.unitId}: el spec usa cy.viewport(). ` +
+    "El viewport 1920x1080 se fija en cypress.config.js y cy.viewport no corrige el DPR físico. " +
+    "Elimina la llamada; Electron recibe --force-device-scale-factor=1 mediante ELECTRON_EXTRA_LAUNCH_ARGS."
+  );
+}
+
+function evidenceSequenceContractError(unit: CuUnit, spec: string): string | undefined {
+  if (unit.cu.inputValues === undefined) return undefined;
+  const statements = executableSpecContent(spec).split(";");
+  const actual: string[] = [];
+  const screenshotPattern = /\bcy\s*\.\s*screenshot\s*\(\s*(["'`])([^"'`]+)\1/g;
+
+  for (const statement of statements) {
+    const documentedCalls = extractDocumentedControlCalls(statement);
+    documentedCalls.forEach((args) => {
+      const screenshotName = args?.[4];
+      if (screenshotName) actual.push(screenshotName);
+    });
+    let match: RegExpExecArray | null;
+    while ((match = screenshotPattern.exec(statement)) !== null) actual.push(match[2]);
+  }
+
+  const expected = actionScreenshots(unit.rf, unit.cu).map((item) => item.baseName);
+  if (JSON.stringify(actual) === JSON.stringify(expected)) return undefined;
+  return (
+    `CONTRATO DE SECUENCIA DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: ` +
+    `se esperaba exactamente ${JSON.stringify(expected)}, pero el spec genera ${JSON.stringify(actual)}. ` +
+    "Debe existir una sola evidencia por acción y en el mismo orden; la evidencia de un control es el quinto argumento de setDocumentedControl."
+  );
+}
+
+function interactionEvidenceContractError(unit: CuUnit, spec: string): string | undefined {
+  if (unit.cu.inputValues === undefined) return undefined;
+  const statements = executableSpecContent(spec)
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  const helperInteraction = /\b(?:setInputValue|setNumericFieldValue|setValueByFormControl|selectRequiredOptionByTextOrValue|selectOptionByTextOrValueIfPresent|selectFirstSelectableOption|openAccordionByComponent)\s*\(/;
+  const directInteraction = /\.(?:click|dblclick|rightclick|select|check|uncheck|focus|blur|trigger|submit)\s*\(/;
+  const screenshot = /\bcy\s*\.\s*screenshot\s*\(/;
+  let pendingInteraction: string | undefined;
+  const violations: string[] = [];
+
+  for (const statement of statements) {
+    // setDocumentedControl genera su captura dentro del propio helper.
+    if (/\bsetDocumentedControl\s*\(/.test(statement)) continue;
+    const isFindButtonClick = /\bfindUiButtonByLabel\s*\([^;]*\)\s*\.\s*click\s*\(/.test(statement);
+    const isDirect = directInteraction.test(statement) && !/\bcy\.(?:window|document)\s*\(/.test(statement);
+    const isInteraction = helperInteraction.test(statement) || isFindButtonClick || isDirect;
+    if (isInteraction) {
+      if (pendingInteraction) {
+        violations.push(`${pendingInteraction} → ${statement.replace(/\s+/g, " ").slice(0, 120)}`);
+      }
+      pendingInteraction = statement.replace(/\s+/g, " ").slice(0, 120);
+    }
+    if (screenshot.test(statement)) pendingInteraction = undefined;
+  }
+  if (pendingInteraction) violations.push(`${pendingInteraction} → sin screenshot posterior`);
+  if (violations.length === 0) return undefined;
+  return (
+    `CONTRATO UNA INTERACCIÓN/UNA EVIDENCIA INCUMPLIDO para ${unit.unitId}: ` +
+    violations.join(" | ") +
+    ". Captura cada interacción antes de iniciar la siguiente."
+  );
+}
+
+function splitCallArguments(argumentText: string): string[] | undefined {
+  const args: string[] = [];
+  let current = "";
+  let quote: string | undefined;
+  let escaped = false;
+  let nested = 0;
+
+  for (const char of argumentText) {
+    if (quote) {
+      current += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") nested += 1;
+    if (char === ")" || char === "]" || char === "}") nested -= 1;
+    if (char === "," && nested === 0) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (quote || nested !== 0) return undefined;
+  args.push(current.trim());
+  return args;
+}
+
+function decodeDirectJsString(token: string): string | undefined {
+  const trimmed = token.trim();
+  const quote = trimmed[0];
+  if ((quote !== '"' && quote !== "'") || trimmed.at(-1) !== quote) return undefined;
+  const body = trimmed.slice(1, -1);
+  let decoded = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char !== "\\") {
+      decoded += char;
+      continue;
+    }
+    index += 1;
+    if (index >= body.length) return undefined;
+    const escaped = body[index];
+    const known: Record<string, string> = {
+      n: "\n",
+      r: "\r",
+      t: "\t",
+      b: "\b",
+      f: "\f",
+      v: "\v",
+      "0": "\0",
+      "\\": "\\",
+      '"': '"',
+      "'": "'",
+    };
+    decoded += known[escaped] ?? escaped;
+  }
+  return decoded;
+}
+
+function extractDocumentedControlCalls(spec: string): Array<Array<string | undefined> | undefined> {
+  const calls: Array<Array<string | undefined> | undefined> = [];
+  const callStart = /\bsetDocumentedControl\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = callStart.exec(spec)) !== null) {
+    const openParen = callStart.lastIndex - 1;
+    let quote: string | undefined;
+    let escaped = false;
+    let depth = 0;
+    let closeParen = -1;
+    for (let index = openParen; index < spec.length; index += 1) {
+      const char = spec[index];
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = undefined;
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+      if (char === "(") depth += 1;
+      else if (char === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          closeParen = index;
+          break;
+        }
+      }
+    }
+    if (closeParen < 0) {
+      calls.push(undefined);
+      break;
+    }
+    const args = splitCallArguments(spec.slice(openParen + 1, closeParen));
+    calls.push(args?.map(decodeDirectJsString));
+    callStart.lastIndex = closeParen + 1;
+  }
+  return calls;
+}
+
+function documentedInputContractError(unit: CuUnit, spec: string): string | undefined {
+  const expected = unit.cu.inputValues;
+  if (expected === undefined) return undefined;
+
+  const actionErrors = inputActionContractErrors(unit.rf.id, unit.cu);
+  if (actionErrors.length > 0) {
+    return (
+      `CONTRATO RFCU CONTROL/ACCIÓN INCUMPLIDO para ${unit.unitId}:\n- ` +
+      actionErrors.join("\n- ") +
+      "\nRegenera/completa rf-cu.md: cada input/select/checkbox debe declarar tipo, valor y una acción independiente."
+    );
+  }
+
+  const executableSpec = executableSpecContent(spec);
+  const calls = extractDocumentedControlCalls(executableSpec);
+  const malformed = calls.some(
+    (args) => !args || args.length !== 5 || args.some((arg) => arg === undefined)
+  );
+  if (malformed) {
+    return (
+      `CONTRATO DE VALORES DE CONTROL INCUMPLIDO para ${unit.unitId}: ` +
+      "cada setDocumentedControl debe tener exactamente cinco literales string: clave, tipo, selector, valor y captura."
+    );
+  }
+
+  const actual = calls as string[][];
+  const screenshots = actionScreenshots(unit.rf, unit.cu);
+  const expectedCalls = expected.map((input) => [
+    input.key,
+    input.kind as string,
+    input.selector,
+    input.value,
+    screenshots[(input.actionNumber as number) - 1].baseName,
+  ]);
+  const same =
+    actual.length === expectedCalls.length &&
+    actual.every((args, index) =>
+      args.every((arg, argIndex) => arg === expectedCalls[index][argIndex])
+    );
+  const usesLegacyInputHelper = /\b(?:setDocumentedInput|setInputValue|setNumericFieldValue|setValueByFormControl|selectRequiredOptionByTextOrValue|selectOptionByTextOrValueIfPresent|selectFirstSelectableOption)\s*\(/.test(executableSpec);
+  const duplicateKeys = new Set(expected.map((input) => input.key)).size !== expected.length;
+
+  if (same && !usesLegacyInputHelper && !duplicateKeys) return undefined;
+  return [
+    `CONTRATO DE VALORES DE CONTROL INCUMPLIDO para ${unit.unitId}.`,
+    `Esperado desde rf-cu.md: ${JSON.stringify(expectedCalls)}.`,
+    `Encontrado en setDocumentedControl: ${JSON.stringify(actual)}.`,
+    usesLegacyInputHelper
+      ? "No uses helpers legacy de input/select cuando el CU tiene valores de controles documentados."
+      : "",
+    duplicateKeys ? "Las claves de control de rf-cu.md deben ser únicas dentro del CU." : "",
+  ].filter(Boolean).join(" ");
+}
+
+async function documentedInputBaselineError(
+  context: LoadedContext,
+  unit: CuUnit
+): Promise<string | undefined> {
+  const expectedInputs = unit.cu.inputValues;
+  if (expectedInputs === undefined) return undefined;
+
+  const frontendRoot = requireFrontendRoot(context);
+  const fixturePath = path.resolve(frontendRoot, baselineFixtureRelativePath);
+  const raw = await readTextIfExists(fixturePath);
+  if (!raw) {
+    return `No existe ${baselineFixtureRelativePath} para validar los inputs de ${unit.unitId}.`;
+  }
+
+  let baseline: Record<string, unknown>;
+  try {
+    baseline = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return `${baselineFixtureRelativePath} no contiene JSON válido.`;
+  }
+  const snapshotKey = Object.keys(baseline).find(
+    (key) => key.toLowerCase() === unit.unitId.toLowerCase()
+  );
+  const snapshot = snapshotKey ? baseline[snapshotKey] : undefined;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return `No existe el snapshot ${unit.unitId} en ${baselineFixtureRelativePath}.`;
+  }
+  const candidateInputs = (snapshot as Record<string, unknown>).inputs;
+  const actualInputs = candidateInputs && typeof candidateInputs === "object" && !Array.isArray(candidateInputs)
+    ? candidateInputs as Record<string, unknown>
+    : {};
+  const expectedRecord = Object.fromEntries(
+    expectedInputs.map((input) => [input.key, input.value])
+  );
+  const expectedKeys = Object.keys(expectedRecord).sort();
+  const actualKeys = Object.keys(actualInputs).sort();
+  const sameKeys = JSON.stringify(actualKeys) === JSON.stringify(expectedKeys);
+  const differing = expectedKeys.filter(
+    (key) => String(actualInputs[key]) !== expectedRecord[key]
+  );
+  if (sameKeys && differing.length === 0) return undefined;
+  return (
+    `BASELINE DE DATOS DE PRUEBA INCORRECTO para ${unit.unitId}: ` +
+    `rf-cu.md exige ${JSON.stringify(expectedRecord)}, pero e2e-baseline.json contiene ` +
+    `${JSON.stringify(actualInputs)}. El spec debe usar setDocumentedControl con todos los valores documentados.`
   );
 }
 
 function specContractError(unit: CuUnit, spec: string): string | undefined {
-  const errors = [screenshotContractError(unit, spec), inputInteractionContractError(unit, spec)]
+  const errors = [
+    screenshotContractError(unit, spec),
+    inputInteractionContractError(unit, spec),
+    evidenceDisplayContractError(unit, spec),
+    viewportInteractionContractError(unit, spec),
+    documentedInputContractError(unit, spec),
+    evidenceSequenceContractError(unit, spec),
+    interactionEvidenceContractError(unit, spec),
+  ]
     .filter((error): error is string => Boolean(error));
   return errors.length > 0 ? errors.join("\n") : undefined;
 }
@@ -1639,6 +2286,7 @@ export async function generateE2ETests(
       );
     }
   }
+  requireRfCuInputActionContract(entries);
 
   const files: string[] = [];
   const iterations: E2EIterationResult[] = [];
@@ -1742,6 +2390,8 @@ export async function generateE2ETests(
 
       if (run.passed) {
         try {
+          const baselineError = await documentedInputBaselineError(context, unit);
+          if (baselineError) throw new Error(baselineError);
           await persistScreenshotEvidence(context, frontendRoot, unit.rf, unit.cu, runStartedAt);
           passed = true;
           await setRfGreen(outputRoot, unit.unitId, true);
@@ -1772,6 +2422,40 @@ export async function generateE2ETests(
               rawOutput: lastOutput,
               injectedOutput: message,
             });
+          } else {
+            const currentSpec = await fs.readFile(fullPath, "utf8");
+            const fixPrompt = buildE2EGenerationPrompt({
+              entry,
+              rules: promptData.text,
+              frontendContext,
+              visitUrl,
+              openApiContext,
+              promptOverride,
+              fix: {
+                currentSpec,
+                cypressOutput: message,
+                attempt,
+              },
+            });
+            await writeRfFeedbackLog({
+              outputRoot,
+              entry,
+              cu: unit.cu,
+              specFileName: fileName,
+              specPath: fullPath,
+              runCommand,
+              passed: false,
+              rawOutput: lastOutput,
+              injectedOutput: message,
+              fixPrompt,
+            });
+            const fixed = await sample(fixPrompt, 16000);
+            if (fixed && fixed.trim().length > 0) {
+              const sanitized = sanitizeGeneratedSpec(fixed);
+              requireSpecContract(unit, sanitized);
+              await fs.writeFile(fullPath, sanitized, "utf8");
+              if (!files.includes(fullPath)) files.push(fullPath);
+            }
           }
           continue;
         }
@@ -2001,6 +2685,7 @@ export async function prepareE2EFallback(
       );
     }
   }
+  requireRfCuInputActionContract(entries);
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
   const frontendRoot = requireFrontendRoot(context);
@@ -2313,6 +2998,7 @@ export async function runE2EFallback(
       );
     }
   }
+  requireRfCuInputActionContract(entries);
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
   const frontendRoot = requireFrontendRoot(context);
@@ -2433,6 +3119,8 @@ export async function runE2EFallback(
 
     if (run.passed) {
       try {
+        const baselineError = await documentedInputBaselineError(context, unit);
+        if (baselineError) throw new Error(baselineError);
         await persistScreenshotEvidence(context, frontendRoot, unit.rf, unit.cu, runStartedAt);
         await setRfGreen(outputRoot, unit.unitId, true);
         const passResult: E2ERunFixResult = {

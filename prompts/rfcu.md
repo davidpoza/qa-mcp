@@ -35,7 +35,13 @@ Formato de salida OBLIGATORIO (respétalo carácter a carácter):
    `- **CU-1: <nombre>.**`
    `- **CU-2: <nombre>.**`
    `- **CU-3: <nombre>.**` (y así sucesivamente si aplica)
-5. Dentro de cada CU, pasos de prueba numerados (mínimo 4), indentados con dos espacios:
+5. Inmediatamente debajo del título de CADA CU, declara los valores exactos de TODOS los controles que aportan datos o estado a la prueba (`<input>`, `<textarea>`, `<select>`/dropdown y checkbox), usando este bloque canónico:
+   `  - **Valores de controles:**`
+       - `<clave-baseline>` | tipo `<input|select|checkbox>` | selector `<selector-css-literal>` | valor `<valor-literal>` | acción `<NN>`
+   Repite la segunda línea por cada control diferente. En `select`, el valor es el TEXTO VISIBLE exacto de la opción; en `checkbox`, `true` o `false`. `NN` es la acción que establece o verifica EXCLUSIVAMENTE ese control. La clave debe ser estable, el selector debe existir LITERALMENTE en el frontend y el valor debe ser exacto. Si el CU no utiliza controles con valor/estado, usa:
+   `  - **Valores de controles:**`
+   `    - Ninguno.`
+6. Dentro de cada CU, pasos de prueba numerados (mínimo 4), indentados con dos espacios:
    `  1. <acción>`
    `  2. <acción>`
    `  3. <acción>`
@@ -59,11 +65,14 @@ Reglas:
   4. Verificar el importe/resultado ESPECÍFICO de esa subsección y su contribución al total.
   Un RF que agrupa varias subsecciones (p. ej. "servicios aeronáuticos" o "complementarios") debe, por tanto, tener **un CU por cada subacordeón/servicio**, además de los CU transversales (nominal global, cambio de contexto, error/vacío). No te quedes en el nivel del acordeón padre.
 - Cada CU debe ser **ejecutable**: pasos concretos y verificables (acciones sobre la UI, verificaciones de API/UI, registro de evidencia), no descripciones genéricas.
+- **DATOS DE PRUEBA OBLIGATORIOS Y LITERALES**: cada paso que escriba, seleccione, marque o deje explícitamente un control sin selección debe mencionar el MISMO valor literal declarado en `Valores de controles`. Está prohibido declarar `Ninguno` si el CU elige sociedad, aeropuerto, categoría, idioma u otra opción. También están prohibidas expresiones ambiguas como "un valor válido" o "la primera opción": documenta el texto visible concreto. Si el mismo control cambia varias veces, crea entradas con claves distintas y sufijo secuencial.
+- **UNA SOLA INTERACCIÓN DE UI POR ACCIÓN (CRÍTICO PARA LAS CAPTURAS)**: no agrupes dos selecciones, escrituras, clicks o expansiones en el mismo paso numerado. Cada escritura de input debe ocupar su PROPIA acción, y el campo `acción <NN>` de su declaración debe apuntar a ella. Por ejemplo, escribir peso, pasajeros y pasajeros en conexión son TRES acciones consecutivas, nunca una sola acción con tres escrituras. Aplica la misma separación a dos dropdowns o dos botones: cada elemento interactuado necesita su acción y su screenshot independiente.
+- Los valores declarados constituyen el contrato con Cypress, las capturas y `cypress/fixtures/e2e-baseline.json`: `setDocumentedControl` debe establecer exactamente cada input/select/checkbox, mostrarlo en su PNG y almacenarlo bajo `inputs` con la misma clave.
 - Redacción en **español**, directa y verificable.
 - Si se entrega un `rf-cu.md` existente parcial, **complétalo** respetando lo ya definido (no reescribas lo correcto; añade CU/pasos que falten y RF no cubiertos).
 - Devuelve **ÚNICAMENTE** el contenido markdown final del fichero, sin explicaciones, sin comentarios y sin vallas de código (` ``` `).
 
-Antes de devolver el resultado, **verifica que CADA RF contiene 2 o más CU** y que el **número de CU varía entre RF** (no todos con la misma cantidad); si algún RF quedó corto o el recuento es uniforme, añade los CU adicionales que correspondan según las dimensiones de prueba anteriores y la evidencia del frontend. **Verifica además que, para cada RF cuya pantalla tenga subsecciones anidadas (subacordeones, pestañas, paneles, componentes hijos repetidos), existe un CU DEDICADO por cada subsección hoja con campos/cálculo/resultado propios**; si algún subacordeón real quedó sin su CU específico, añádelo (no dejes subsecciones cubiertas solo de forma agregada).
+Antes de devolver el resultado, **verifica que CADA RF contiene 2 o más CU** y que el **número de CU varía entre RF** (no todos con la misma cantidad); si algún RF quedó corto o el recuento es uniforme, añade los CU adicionales que correspondan según las dimensiones de prueba anteriores y la evidencia del frontend. **Verifica además que, para cada RF cuya pantalla tenga subsecciones anidadas (subacordeones, pestañas, paneles, componentes hijos repetidos), existe un CU DEDICADO por cada subsección hoja con campos/cálculo/resultado propios**; si algún subacordeón real quedó sin su CU específico, añádelo (no dejes subsecciones cubiertas solo de forma agregada). Finalmente, verifica que TODOS los CU contienen `Valores de controles`, que cada input/select/checkbox usado aparece con tipo, selector, valor y acción exactos, que ninguna acción interactúa con más de un elemento y que no queda ningún dato ambiguo.
 
 --- Endpoints OpenAPI (REFERENCIA para entender la API; en MODO UI-FIRST NO es checklist de cobertura; en MODO SIN FRONTEND es la fuente principal de RF) ---
 {OPENAPI_ENDPOINTS}

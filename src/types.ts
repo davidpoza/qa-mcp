@@ -46,6 +46,26 @@ export interface CuCase {
   id: string;
   name: string;
   steps: string[];
+  /**
+   * Valores literales de los controles con datos de prueba que utiliza el CU.
+   * Incluye input/textarea, select/dropdown y checkbox. `undefined`
+   * identifica documentos antiguos sin el bloque canónico; `[]` significa que
+   * el CU declara explícitamente que no utiliza controles con valor/estado.
+   */
+  inputValues?: CuInputValue[];
+}
+
+export interface CuInputValue {
+  /** Clave exacta que debe aparecer bajo `inputs` en e2e-baseline.json. */
+  key: string;
+  /** Tipo de control que recibe el dato de prueba. Obligatorio en el contrato actual. */
+  kind?: "input" | "select" | "checkbox";
+  /** Selector CSS literal del control o de su componente contenedor. */
+  selector: string;
+  /** Valor exacto que el test establece y el baseline almacena. */
+  value: string;
+  /** Acción numerada (base 1) que establece el control y genera su evidencia. */
+  actionNumber?: number;
 }
 
 export interface RfEntry {
