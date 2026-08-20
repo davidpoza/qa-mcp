@@ -49,7 +49,7 @@ Reglas obligatorias de implementación:
 
 8) Evidencias por acción (CRÍTICO)
 - No agrupar varias interacciones en una acción: cada input, dropdown, checkbox, click o acordeón debe tener su propio paso y su propia captura. Para controles documentados, la captura ya está integrada en el quinto argumento de `setDocumentedControl`; no duplicarla con otro `cy.screenshot`.
-- Antes de CUALQUIER interacción con un elemento de UI, llevarlo al viewport. Los helpers compartidos de inputs, selects, botones y acordeones ya lo hacen; para una interacción directa usar `scrollIntoViewForEvidence(selector)` o encadenar `.scrollIntoView(...).should('be.visible')` antes de actuar.
+- Antes de CUALQUIER interacción con un elemento de UI, llevarlo completo al viewport y comprobar que no queda tapado por ningún elemento fijo, sticky u overlay. Los helpers compartidos de inputs, selects, botones y acordeones ya lo centran y validan dinámicamente su geometría y oclusión, sin asumir estructura o medidas de una aplicación concreta; para una interacción directa usar inmediatamente antes `scrollIntoViewForEvidence(selector)`. No usar `.scrollIntoView()` directamente: `be.visible` no detecta oclusiones.
 - Al expandir un acordeón, hacer scroll sobre su encabezado antes del click; `openAccordionByComponent` incorpora este comportamiento.
 - Después de completar y verificar cada acción numerada del CU, llamar a `cy.screenshot()` con el nombre exacto indicado por el prompt de generación.
 - Generar una captura documental por cada acción, en el mismo orden, cuando el estado visual ya sea estable y la imagen muestre inequívocamente el control/resultado afectado. La mera existencia del PNG no basta si el elemento probado queda fuera del viewport.

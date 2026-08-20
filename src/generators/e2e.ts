@@ -622,7 +622,7 @@ function buildE2EGenerationPrompt(params: {
     "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un ÚNICO `it` para el CU de ESTE fichero (cada CU vive en su propio spec; NO añadas otros CU ni `it` adicionales). Nombre del `it`: `\"<CU-id> <nombre>\"`, en español.",
     "- **EVIDENCIAS DOCUMENTALES POR ACCIÓN (OBLIGATORIO)**: debe existir UNA captura por cada acción numerada, en el mismo orden, y la imagen debe demostrar visualmente la acción descrita. Toda acción asociada a `Valores de controles` usa la llamada exacta `setDocumentedControl(clave, tipo, selector, valor, screenshotBaseName)`: para input, select/dropdown y checkbox el helper espera cualquier re-render, vuelve a llevar el control al viewport, comprueba el valor/estado DOM, lo resalta y captura el dato visible. NO añadas un segundo screenshot. Para acciones sin control documentado, llama a `cy.screenshot` inmediatamente después de completar/verificar la acción. No agrupes interacciones ni capturas al final. No añadas extensión: Cypress genera el `.png` nativo.",
     "- **RESOLUCIÓN DE EVIDENCIAS**: el proyecto queda configurado a 1920x1080 con escala/DPR 1 (100 %). NO uses nunca `cy.viewport()` ni cambies el zoom: cy.viewport sólo cambia píxeles CSS y NO corrige el DPR físico. Electron recibe el switch mediante ELECTRON_EXTRA_LAUNCH_ARGS; el servidor rechazará cualquier PNG cuyo tamaño físico no sea exactamente 1920x1080.",
-    "- **VIEWPORT ANTES DE TODA INTERACCIÓN (OBLIGATORIO)**: antes de click/select/escritura/check sobre CUALQUIER elemento de UI, ese elemento debe entrar en el viewport. Los helpers compartidos de inputs, selects, botones y acordeones ya hacen scroll internamente. Para cualquier interacción Cypress directa, llama antes a `scrollIntoViewForEvidence('<selector>')` o encadena `.scrollIntoView({ duration: 0, offset: { top: -100, left: 0 } }).should('be.visible')`. Esto es especialmente obligatorio antes de expandir un acordeón. La captura de la acción se toma DESPUÉS, mientras el control accionado sigue en el viewport.",
+    "- **VIEWPORT ANTES DE TODA INTERACCIÓN (OBLIGATORIO)**: antes de click/select/escritura/check sobre CUALQUIER elemento de UI, ese elemento debe entrar completo en el viewport y no quedar tapado por ningún elemento fijo, sticky u overlay. Los helpers compartidos de inputs, selects, botones y acordeones ya lo centran y validan dinámicamente su geometría y oclusión, sin asumir ninguna estructura de página. Para cualquier interacción Cypress directa, llama inmediatamente antes a `scrollIntoViewForEvidence('<selector>')`; NO uses `.scrollIntoView()` directamente porque `be.visible` no detecta oclusiones. Esto es especialmente obligatorio antes de expandir un acordeón. La captura de la acción se toma DESPUÉS, mientras el control accionado sigue expuesto.",
     "- Nombres exactos de las capturas requeridas para este CU:",
     formatScreenshotContract(entry),
     "- **REGLA CRÍTICA DE SELECTORES**: usa ÚNICAMENTE selectores que aparezcan LITERALMENTE en el código frontend proporcionado (busca `id=\"...\"`, `formcontrolname=\"...\"`, tags de componentes `app-*`/`empresas-ui-*`, clases CSS, `data-*`, y textos exactos de botones). PROHIBIDO inventar selectores a partir del `operationId` o de nombres en inglés del OpenAPI. Si el endpoint es `get-salesOrganizations` pero en el HTML el control es `id=\"sociedad\"`, DEBES usar `#sociedad`, nunca `[formcontrolname='salesOrganization']`.",
@@ -882,8 +882,6 @@ function buildE2EHelpersFile(): string {
     "} = require('./e2e-baseline');",
     "",
     "const DEFAULT_BASELINE_FIXTURE = 'cypress/fixtures/e2e-baseline.json';",
-    "const EVIDENCE_SCROLL_OPTIONS = { duration: 0, offset: { top: -100, left: 0 } };",
-    "",
     "// Los tests E2E corren contra una app real cargada de SDKs de terceros (Gigya, cookies, analitica).",
     "// Esos scripts cross-origin lanzan excepciones no capturadas ('Script error.') ajenas a lo que probamos.",
     "// Por defecto Cypress tumbaria el test (incluso en beforeEach, saltandose toda la suite), asi que las ignoramos.",
@@ -1009,12 +1007,37 @@ function buildE2EHelpersFile(): string {
     "  });",
     "}",
     "",
+    "function centerElementForEvidence($element, description) {",
+    "  const element = $element && $element[0];",
+    "  expect(element, `elemento de evidencia ${description}`).to.exist;",
+    "  element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' });",
+    "  return waitForApplicationPaint().then(() => {",
+    "    const rect = element.getBoundingClientRect();",
+    "    const appWindow = element.ownerDocument && element.ownerDocument.defaultView;",
+    "    expect(appWindow, `ventana de ${description}`).to.exist;",
+    "    expect(rect.width, `${description} sin anchura renderizada`).to.be.greaterThan(0);",
+    "    expect(rect.height, `${description} sin altura renderizada`).to.be.greaterThan(0);",
+    "    expect(rect.top, `${description} fuera del borde superior`).to.be.at.least(0);",
+    "    expect(rect.bottom, `${description} fuera del borde inferior`).to.be.at.most(appWindow.innerHeight);",
+    "    expect(rect.left, `${description} fuera del borde izquierdo`).to.be.at.least(0);",
+    "    expect(rect.right, `${description} fuera del borde derecho`).to.be.at.most(appWindow.innerWidth);",
+    "    const elementAtCenter = element.ownerDocument.elementFromPoint(",
+    "      rect.left + rect.width / 2,",
+    "      rect.top + rect.height / 2",
+    "    );",
+    "    const centerIsExposed = Boolean(",
+    "      elementAtCenter &&",
+    "      (elementAtCenter === element || element.contains(elementAtCenter) || elementAtCenter.contains(element))",
+    "    );",
+    "    expect(centerIsExposed, `${description} tapado por otro elemento`).to.eq(true);",
+    "    return cy.wrap($element, { log: false }).should('be.visible');",
+    "  });",
+    "}",
+    "",
     "function scrollIntoViewForEvidence(rootSelector) {",
-    "  return cy",
-    "    .get(rootSelector, { timeout: 10000 })",
-    "    .first()",
-    "    .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
-    "    .should('be.visible');",
+    "  return cy.get(rootSelector, { timeout: 10000 }).first().then(($root) =>",
+    "    centerElementForEvidence($root, rootSelector)",
+    "  );",
     "}",
     "",
     "function inputEvidenceKey(inputSelector, nativeInput, explicitKey) {",
@@ -1045,10 +1068,7 @@ function buildE2EHelpersFile(): string {
     "",
     "function setInputValue(inputSelector, value, evidenceKey) {",
     "  const valueAsText = String(value);",
-    "  return cy.get(inputSelector, { timeout: 10000 })",
-    "    .first()",
-    "    .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
-    "    .should('be.visible')",
+    "  return scrollIntoViewForEvidence(inputSelector)",
     "    .then(($input) => {",
     "      const nativeInput = $input[0];",
     "      if (!nativeInput || !/^(INPUT|TEXTAREA)$/.test(nativeInput.tagName)) {",
@@ -1121,8 +1141,7 @@ function buildE2EHelpersFile(): string {
     "    .then(() => cy.get(inputSelector, { timeout: 10000 }).first())",
     "    .then(($freshRoot) => {",
     "      const $freshNative = resolveDocumentedNativeInput($freshRoot, inputSelector);",
-    "      return cy.wrap($freshNative, { log: false })",
-    "        .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "      return centerElementForEvidence($freshNative, inputSelector)",
     "        .should('be.visible')",
     "        .and('have.value', valueAsText)",
     "        .then(($verifiedInput) => {",
@@ -1131,8 +1150,7 @@ function buildE2EHelpersFile(): string {
     "            .then(() => cy.get(inputSelector, { timeout: 10000 }).first())",
     "            .then(($evidenceRoot) => {",
     "              const $evidenceInput = resolveDocumentedNativeInput($evidenceRoot, inputSelector);",
-    "              return cy.wrap($evidenceInput, { log: false })",
-    "                .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
+    "              return centerElementForEvidence($evidenceInput, inputSelector)",
     "                .should('be.visible')",
     "                .and('have.value', valueAsText)",
     "                .then(($evidenceInput) => {",
@@ -1328,7 +1346,7 @@ function buildE2EHelpersFile(): string {
     "  return cy",
     "    .get('empresas-ui-button, button, [role=\"button\"]', { timeout: 10000 })",
     "    .then(($els) => $els.filter((i, el) => matchesButtonLabel(el, labelOrText)).first())",
-    "    .then(($match) => cy.wrap($match).scrollIntoView(EVIDENCE_SCROLL_OPTIONS).should('be.visible'));",
+    "    .then(($match) => centerElementForEvidence($match, `botón ${labelOrText}`));",
     "}",
     "",
     "function assertUiButtonDisabled(labelOrText) {",
@@ -1372,7 +1390,7 @@ function buildE2EHelpersFile(): string {
     "        .first();",
     "    }",
     "    if ($consentButton.length > 0) {",
-    "      return cy.wrap($consentButton).scrollIntoView(EVIDENCE_SCROLL_OPTIONS).click({ force: true });",
+    "      return centerElementForEvidence($consentButton, 'botón de consentimiento').click({ force: true });",
     "    }",
     "    return undefined;",
     "  });",
@@ -1387,9 +1405,7 @@ function buildE2EHelpersFile(): string {
     "        .find('.card-header, .accordion-header, mat-expansion-panel-header')",
     "        .first();",
     "      if (header && header.length > 0) {",
-    "        cy.wrap(header)",
-    "          .scrollIntoView(EVIDENCE_SCROLL_OPTIONS)",
-    "          .should('be.visible')",
+    "        centerElementForEvidence(header, `acordeón ${componentSelector}`)",
     "          .click({ force: true });",
     "      }",
     "    });",
@@ -1931,7 +1947,6 @@ function viewportInteractionContractError(unit: CuUnit, spec: string): string | 
     if (!interaction.test(statement)) return;
     const previous = statements[index - 1] ?? "";
     const scrollsCurrentTarget =
-      /\.scrollIntoView\s*\(/.test(statement) ||
       /\bscrollIntoViewForEvidence\s*\(/.test(statement) ||
       /\bfindUiButtonByLabel\s*\(/.test(statement);
     const explicitPreviousScroll = /\bscrollIntoViewForEvidence\s*\(/.test(previous);
@@ -1945,8 +1960,8 @@ function viewportInteractionContractError(unit: CuUnit, spec: string): string | 
   return (
     `CONTRATO DE VIEWPORT INCUMPLIDO para ${unit.unitId}: hay interacciones sin scroll previo: ` +
     violations.map((statement) => `\`${statement}\``).join(", ") +
-    ". Usa un helper compartido que haga scroll, scrollIntoViewForEvidence(selector) inmediatamente antes, " +
-    "o encadena .scrollIntoView(...).should('be.visible') antes de interactuar."
+    ". Usa un helper compartido o scrollIntoViewForEvidence(selector) inmediatamente antes. " +
+    "No uses .scrollIntoView() directamente: Cypress puede considerar visible un elemento ocluido por otra capa."
   );
 }
 
