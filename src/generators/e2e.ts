@@ -577,6 +577,8 @@ function formatScreenshotContract(entry: RfEntry): string {
  * para un RF y sus CU, reutilizando la librería de helpers compartida y
  * derivando selectores del código frontend.
  */
+type E2EFixKind = "cypress" | "contract" | "postcondition";
+
 function buildE2EGenerationPrompt(params: {
   entry: RfEntry;
   rules: string;
@@ -584,10 +586,21 @@ function buildE2EGenerationPrompt(params: {
   visitUrl: string;
   openApiContext: string;
   promptOverride?: string;
-  fix?: { currentSpec: string; cypressOutput: string; attempt: number };
+  fix?: {
+    currentSpec: string;
+    cypressOutput: string;
+    attempt: number;
+    kind?: E2EFixKind;
+  };
   frontendIsFileList?: boolean;
 }): string {
   const { entry, rules, frontendContext, visitUrl, openApiContext, promptOverride, fix, frontendIsFileList } = params;
+  const fixKind = fix?.kind ?? "cypress";
+  const fixIntroduction = fixKind === "postcondition"
+    ? "Eres un ingeniero de QA experto en Cypress. El spec E2E PASÓ en Cypress, pero falló una validación documental posterior (baseline o evidencias). Corrige exclusivamente esa postcondición y conserva la lógica de negocio y las aserciones que Cypress ya validó."
+    : fixKind === "contract"
+      ? "Eres un ingeniero de QA experto en Cypress. El spec E2E no se ejecutó porque incumple el contrato estático del MCP. Corrige exactamente el contrato indicado sin alterar innecesariamente la lógica de negocio del Caso de Uso."
+      : "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que el `it()` de este CU pase sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura del Caso de Uso (NO lo elimines ni lo conviertas en `it.skip`).";
   const methodPaths = splitMethodPaths(entry.methodPath);
   const operationIds = entry.operationId.split(/\s*;\s*/);
   const isUiOnly =
@@ -605,7 +618,7 @@ function buildE2EGenerationPrompt(params: {
 
   return [
     fix
-      ? "Eres un ingeniero de QA experto en Cypress. El spec E2E de más abajo FALLÓ al ejecutarse en Cypress. CORRÍGELO para que el `it()` de este CU pase sin errores, aplicando las reglas y usando la salida de Cypress para diagnosticar. Mantén la cobertura del Caso de Uso (NO lo elimines ni lo conviertas en `it.skip`)."
+      ? fixIntroduction
       : "Eres un ingeniero de QA experto en Cypress. Genera un fichero de test E2E COMPLETO y EJECUTABLE en JavaScript PLANO (`.cy.js`) para el siguiente Requisito Funcional y UN ÚNICO Caso de Uso (un `describe` con un solo `it`).",
     "",
     `## Requisito funcional: ${entry.id} — ${entry.name}`,
@@ -680,19 +693,27 @@ function buildE2EGenerationPrompt(params: {
     fix
       ? [
           "",
-          `## Spec actual que FALLA (intento previo #${fix.attempt}):`,
+          `## Spec actual a corregir (intento previo #${fix.attempt}):`,
           "```ts",
           fix.currentSpec.trim(),
           "```",
           "",
-          "## Salida de Cypress con los errores a corregir:",
+          fixKind === "cypress"
+            ? "## Salida de Cypress con los errores a corregir:"
+            : "## Diagnóstico del contrato MCP a corregir:",
           "```",
           fix.cypressOutput.trim(),
           "```",
           "",
           "## Cómo corregir (OBLIGATORIO):",
-          "- Diagnostica CADA test fallido a partir del mensaje de aserción, el code-frame y el stack de la salida de Cypress.",
-          "- Corrige la causa REAL del fallo aplicando TODAS las reglas de arriba (selectores literales del código, controles custom, valores sintéticos `[ngValue]`, esperar opciones asíncronas con `waitForSelectableOptions`, CU de error = acción mínima + `cy.url().should('include','/error')` + PARAR, no afirmar recuentos exactos de opciones, no tocar controles no afectados, etc.).",
+          fixKind === "cypress"
+            ? "- Diagnostica CADA test fallido a partir del mensaje de aserción, el code-frame y el stack de la salida de Cypress."
+            : fixKind === "postcondition"
+              ? "- Cypress ya está en verde: NO busques aserciones fallidas ni cambies el flujo funcional. Corrige sólo la evidencia o el baseline que identifica el diagnóstico."
+              : "- Cypress no llegó a ejecutarse: aplica literalmente el diagnóstico del contrato estático; no inventes un fallo funcional.",
+          fixKind === "cypress"
+            ? "- Corrige la causa REAL del fallo aplicando TODAS las reglas de arriba (selectores literales del código, controles custom, valores sintéticos `[ngValue]`, esperar opciones asíncronas con `waitForSelectableOptions`, CU de error = acción mínima + `cy.url().should('include','/error')` + PARAR, no afirmar recuentos exactos de opciones, no tocar controles no afectados, etc.)."
+            : "- Mantén intactas las interacciones y aserciones de negocio salvo que el diagnóstico señale expresamente una de ellas.",
           "- Si un `it()` YA pasaba, NO cambies su lógica salvo que sea imprescindible; céntrate en los que fallan.",
           "- No elimines Casos de Uso ni los conviertas en `it.skip`. Todos deben quedar ejecutables y en verde.",
           "- Conserva exactamente las llamadas `setDocumentedControl` de cinco argumentos exigidas por rf-cu.md (clave, tipo, selector, valor, captura y orden); cada una genera la evidencia de SU control después de verificar el dato visible.",
@@ -2527,6 +2548,7 @@ export async function generateE2ETests(
               cypressOutput:
                 target.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
               attempt: 0,
+              kind: "contract",
             }
           : undefined,
       });
@@ -2621,6 +2643,7 @@ export async function generateE2ETests(
                 currentSpec,
                 cypressOutput: message,
                 attempt,
+                kind: "postcondition",
               },
             });
             await writeRfFeedbackLog({
@@ -2968,6 +2991,7 @@ export async function prepareE2EFallback(
             cypressOutput:
               current.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
             attempt: 0,
+            kind: "contract",
           }
         : undefined,
     });
@@ -3021,6 +3045,7 @@ export async function prepareE2EFallback(
             cypressOutput:
               target.contractError ?? "El spec debe cumplir los contratos de inputs y evidencias.",
             attempt: 0,
+            kind: "contract",
           }
         : undefined,
     });
@@ -3061,6 +3086,8 @@ export interface E2ERunFixResult {
   fixPrompt?: string;
   /** true si el fallo es por caché V8 corrupta de Cypress (error de ENTORNO). */
   cacheError?: boolean;
+  /** Fase que falló, para no confundir un Cypress verde con un fallo documental. */
+  failureKind?: E2EFixKind | "environment";
   /** Ruta del fichero .log con el feedback completo persistido (raw + prompt). */
   logPath?: string;
 }
@@ -3238,6 +3265,7 @@ export async function runE2EFallback(
     rawOutput: string;
     fileName: string;
     fullPath: string;
+    kind: E2EFixKind;
   }
 
   const results: E2ERunFixResult[] = [];
@@ -3278,6 +3306,7 @@ export async function runE2EFallback(
         passed: false,
         missing: false,
         output: contractError,
+        failureKind: "contract",
       };
       results.push(result);
       failures.push({
@@ -3288,6 +3317,7 @@ export async function runE2EFallback(
         rawOutput: contractError,
         fileName,
         fullPath,
+        kind: "contract",
       });
       continue;
     }
@@ -3340,6 +3370,7 @@ export async function runE2EFallback(
           passed: false,
           missing: false,
           output: message,
+          failureKind: "postcondition",
         };
         results.push(result);
         failures.push({
@@ -3350,6 +3381,7 @@ export async function runE2EFallback(
           rawOutput: `${run.output}\n\n[qa-mcp] ${message}`,
           fileName,
           fullPath,
+          kind: "postcondition",
         });
         continue;
       }
@@ -3366,6 +3398,7 @@ export async function runE2EFallback(
         passed: false,
         missing: false,
         cacheError: true,
+        failureKind: "environment",
         output: `${cypressCacheErrorNotice(resolveE2ERuntime(context).nodePath)}\n\n${extractCypressFailureSummary(run.output, 2000)}`,
       };
       cacheResult.logPath = await writeRfFeedbackLog({
@@ -3391,9 +3424,19 @@ export async function runE2EFallback(
       passed: false,
       missing: false,
       output: extractCypressFailureSummary(run.output, 2000),
+      failureKind: "cypress",
     };
     results.push(result);
-    failures.push({ result, unit, entry, currentSpec, rawOutput: run.output, fileName, fullPath });
+    failures.push({
+      result,
+      unit,
+      entry,
+      currentSpec,
+      rawOutput: run.output,
+      fileName,
+      fullPath,
+      kind: "cypress",
+    });
   }
 
   const failuresToFix = oneFixAtATime ? failures.slice(0, 1) : failures;
@@ -3414,8 +3457,11 @@ export async function runE2EFallback(
         frontendIsFileList: leanFrontend,
         fix: {
           currentSpec: failure.currentSpec,
-          cypressOutput: extractCypressFailureSummary(failure.rawOutput, 4000),
+          cypressOutput: failure.kind === "cypress"
+            ? extractCypressFailureSummary(failure.rawOutput, 4000)
+            : failure.result.output ?? "Fallo de contrato sin diagnóstico.",
           attempt: 1,
+          kind: failure.kind,
         },
       });
       failure.result.logPath = await writeRfFeedbackLog({

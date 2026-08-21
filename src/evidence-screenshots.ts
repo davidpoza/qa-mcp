@@ -180,6 +180,128 @@ async function cypressScreenshotDirectory(frontendRoot: string): Promise<string>
   return path.resolve(frontendRoot, "cypress", "screenshots");
 }
 
+interface CypressScreenshotCandidate {
+  filePath: string;
+  /** Cypress deja el primer intento sin sufijo y añade `(attempt N)` a los retries. */
+  attempt: number;
+  mtimeMs: number;
+}
+
+interface CompleteScreenshotAttempt {
+  attempt: number;
+  files: Array<{
+    screenshot: ActionScreenshot;
+    candidate: CypressScreenshotCandidate;
+    dimensions: { width: number; height: number } | undefined;
+  }>;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Resuelve el número de intento a partir del nombre que genera Cypress:
+ * `evidence.png` para el primero y `evidence (attempt 2).png` para el segundo.
+ */
+function screenshotAttempt(filePath: string, expectedFileName: string): number | undefined {
+  const actual = path.basename(filePath);
+  if (actual.localeCompare(expectedFileName, undefined, { sensitivity: "accent" }) === 0) {
+    return 1;
+  }
+
+  const parsed = path.parse(expectedFileName);
+  const retryPattern = new RegExp(
+    `^${escapeRegExp(parsed.name)} \\(attempt ([1-9]\\d*)\\)${escapeRegExp(parsed.ext)}$`,
+    "i"
+  );
+  const retry = retryPattern.exec(actual);
+  if (!retry) return undefined;
+  return Number(retry[1]);
+}
+
+async function screenshotCandidates(
+  files: string[],
+  screenshot: ActionScreenshot,
+  notBeforeMs?: number
+): Promise<CypressScreenshotCandidate[]> {
+  const candidates = await Promise.all(
+    files.map(async (filePath): Promise<CypressScreenshotCandidate | undefined> => {
+      const attempt = screenshotAttempt(filePath, screenshot.fileName);
+      if (attempt === undefined) return undefined;
+      const mtimeMs = (await fs.stat(filePath)).mtimeMs;
+      if (notBeforeMs !== undefined && mtimeMs < notBeforeMs - 2000) return undefined;
+      return { filePath, attempt, mtimeMs };
+    })
+  );
+  return candidates.filter(
+    (candidate): candidate is CypressScreenshotCandidate => candidate !== undefined
+  );
+}
+
+/**
+ * Devuelve el último intento de Cypress sólo si contiene el juego COMPLETO de
+ * evidencias. Es importante no caer a un intento anterior: el último es el que
+ * determina el resultado final del test y tampoco se deben mezclar sus PNG con
+ * los de un retry previo.
+ */
+async function resolveCompleteScreenshotAttempt(
+  files: string[],
+  expected: ActionScreenshot[],
+  notBeforeMs?: number
+): Promise<CompleteScreenshotAttempt | undefined> {
+  const candidatesByScreenshot = await Promise.all(
+    expected.map((screenshot) => screenshotCandidates(files, screenshot, notBeforeMs))
+  );
+  const attempts = new Set<number>();
+  candidatesByScreenshot.forEach((candidates) =>
+    candidates.forEach((candidate) => attempts.add(candidate.attempt))
+  );
+
+  if (attempts.size === 0) return undefined;
+  const attempt = Math.max(...attempts);
+  const selected = expected.map((screenshot, index) => {
+    const candidates = candidatesByScreenshot[index]
+      .filter((candidate) => candidate.attempt === attempt)
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+    return candidates[0]
+      ? { screenshot, candidate: candidates[0], dimensions: undefined }
+      : undefined;
+  });
+  if (selected.some((candidate) => candidate === undefined)) return undefined;
+  return {
+    attempt,
+    files: selected as CompleteScreenshotAttempt["files"],
+  };
+}
+
+function availableAttemptsDescription(
+  expected: ActionScreenshot[],
+  files: string[]
+): string {
+  const attempts = new Map<number, string[]>();
+  for (const screenshot of expected) {
+    for (const file of files) {
+      const attempt = screenshotAttempt(file, screenshot.fileName);
+      if (attempt === undefined) continue;
+      const names = attempts.get(attempt) ?? [];
+      names.push(screenshot.fileName);
+      attempts.set(attempt, names);
+    }
+  }
+  if (attempts.size === 0) return "No se encontró ninguna evidencia esperada.";
+  return [...attempts.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([attempt, names]) => {
+      const present = new Set(names);
+      const missing = expected
+        .filter((screenshot) => !present.has(screenshot.fileName))
+        .map((screenshot) => screenshot.fileName);
+      return `Intento ${attempt}: faltan ${missing.length > 0 ? missing.join(", ") : "ninguna"}.`;
+    })
+    .join(" ");
+}
+
 /**
  * Copia las capturas PNG nativas producidas por Cypress a una ubicación estable
  * que no se borra al ejecutar el siguiente spec.
@@ -197,42 +319,43 @@ export async function persistScreenshotEvidence(
   const cypressScreenshots = await cypressScreenshotDirectory(frontendRoot);
   const files = await listFilesRecursive(cypressScreenshots);
   const destination = screenshotEvidenceDirectory(context);
-  await fs.mkdir(destination, { recursive: true });
-
-  const persisted: string[] = [];
-  for (const screenshot of expected) {
-    const matches = files.filter(
-      (file) => path.basename(file).toLowerCase() === screenshot.fileName.toLowerCase()
+  const completeAttempt = await resolveCompleteScreenshotAttempt(files, expected, notBeforeMs);
+  if (!completeAttempt) {
+    const currentFiles = notBeforeMs === undefined
+      ? files
+      : (await Promise.all(
+          files.map(async (filePath) => ({ filePath, mtimeMs: (await fs.stat(filePath)).mtimeMs }))
+        ))
+          .filter((file) => file.mtimeMs >= notBeforeMs - 2000)
+          .map((file) => file.filePath);
+    throw new Error(
+      `Cypress terminó en verde, pero el último intento no generó el juego completo de capturas ` +
+        `para ${rf.id}.${cu.id}. ${availableAttemptsDescription(expected, currentFiles)}`
     );
-    if (matches.length === 0) {
-      throw new Error(
-        `Cypress terminó en verde, pero no generó la captura ${screenshot.fileName} ` +
-          `para la acción ${screenshot.actionIndex + 1} de ${rf.id}.${cu.id}.`
-      );
-    }
-    const candidates = (await Promise.all(
-      matches.map(async (file) => ({ file, mtimeMs: (await fs.stat(file)).mtimeMs }))
-    )).filter((candidate) => notBeforeMs === undefined || candidate.mtimeMs >= notBeforeMs - 2000);
-    if (candidates.length === 0) {
-      throw new Error(
-        `La captura ${screenshot.fileName} existe, pero no fue generada por la ejecución actual de ${rf.id}.${cu.id}.`
-      );
-    }
-    candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    const selected = candidates[0].file;
-    const dimensions = await pngDimensions(selected);
+  }
+
+  // Primero valida el lote completo. Así un error tardío no deja evidencias
+  // parciales que parezcan pertenecer a una ejecución válida.
+  for (const item of completeAttempt.files) {
+    item.dimensions = await pngDimensions(item.candidate.filePath);
+    const dimensions = item.dimensions;
     if (
       dimensions?.width !== EVIDENCE_SCREENSHOT_WIDTH ||
       dimensions.height !== EVIDENCE_SCREENSHOT_HEIGHT
     ) {
       const actual = dimensions ? `${dimensions.width}x${dimensions.height}` : "formato no-PNG";
       throw new Error(
-        `La captura ${screenshot.fileName} tiene resolución ${actual}; ` +
+        `La captura ${item.screenshot.fileName} del intento ${completeAttempt.attempt} tiene resolución ${actual}; ` +
           `las evidencias deben generarse a ${EVIDENCE_SCREENSHOT_WIDTH}x${EVIDENCE_SCREENSHOT_HEIGHT} con escala 100%.`
       );
     }
-    const outputPath = path.join(destination, screenshot.fileName);
-    await fs.copyFile(selected, outputPath);
+  }
+
+  await fs.mkdir(destination, { recursive: true });
+  const persisted: string[] = [];
+  for (const item of completeAttempt.files) {
+    const outputPath = path.join(destination, item.screenshot.fileName);
+    await fs.copyFile(item.candidate.filePath, outputPath);
     persisted.push(outputPath);
   }
   return persisted;

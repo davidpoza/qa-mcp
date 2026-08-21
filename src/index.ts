@@ -389,6 +389,51 @@ function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
       `SIGUIENTE_ACCIÓN_OBLIGATORIA: repara el entorno y vuelve a llamar a ${scope.runCall}. No cierres la tarea.`,
     ]);
   }
+  if (single?.failureKind === "postcondition") {
+    return withDiag([
+      `⚠️ ${single.rf} — ${single.name}: CYPRESS PASA, pero falla la validación documental posterior.`,
+      `Progreso: ${green}/${total} CU en verde. El CU no se marca en verde hasta persistir baseline y evidencias.`,
+      `Ámbito solicitado: ${scope.label}.`,
+      "",
+      buildAssistedAutoContinueMandate(rfFilter),
+      "",
+      "QUÉ HACER AHORA:",
+      "1) No diagnostiques aserciones de Cypress ni cambies el comportamiento funcional: la ejecución ya pasó.",
+      "2) Aplica el diagnóstico y el prompt únicamente al baseline o a las evidencias indicadas.",
+      `3) Reescribe el spec sólo si lo exige esa postcondición y vuelve a llamar a ${scope.runCall}.`,
+      `Ruta del spec: ${single.filePath}`,
+      single.logPath ? `Log de feedback: ${single.logPath}` : "",
+      "--- DIAGNÓSTICO POST-EJECUCIÓN ---",
+      single.output ?? "(sin diagnóstico)",
+      "--- PROMPT DE CORRECCIÓN DOCUMENTAL ---",
+      single.fixPrompt ?? "(no disponible)",
+      "--- FIN PROMPT ---",
+      "",
+      buildSubtaskSignal("continue", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: corrige la postcondición indicada y llama inmediatamente a ${scope.runCall}. No cierres la tarea.`,
+    ].filter(Boolean));
+  }
+  if (single?.failureKind === "contract") {
+    return withDiag([
+      `⚠️ ${single.rf} — ${single.name}: el spec NO se ejecutó porque incumple el contrato estático del MCP.`,
+      `Progreso: ${green}/${total} CU en verde.`,
+      `Ámbito solicitado: ${scope.label}.`,
+      "",
+      buildAssistedAutoContinueMandate(rfFilter),
+      "",
+      "Corrige literalmente el contrato indicado sin alterar innecesariamente la lógica de negocio y vuelve a ejecutar el mismo CU.",
+      `Ruta del spec: ${single.filePath}`,
+      single.logPath ? `Log de feedback: ${single.logPath}` : "",
+      "--- DIAGNÓSTICO DE CONTRATO ---",
+      single.output ?? "(sin diagnóstico)",
+      "--- PROMPT DE CORRECCIÓN ---",
+      single.fixPrompt ?? "(no disponible)",
+      "--- FIN PROMPT ---",
+      "",
+      buildSubtaskSignal("continue", rfFilter),
+      `SIGUIENTE_ACCIÓN_OBLIGATORIA: corrige el contrato y llama inmediatamente a ${scope.runCall}. No cierres la tarea.`,
+    ].filter(Boolean));
+  }
   return withDiag([
     `❌ ${single?.rf} — ${single?.name}: FALLA.`,
     `Progreso: ${green}/${total} CU en verde. Este CU NO avanza hasta que pase.`,
