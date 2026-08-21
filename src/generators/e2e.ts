@@ -2,7 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext, RfEntry, CuCase } from "../types";
 import { requireFrontendRoot } from "../config";
-import { extractOrBuildRfEntries, inputActionContractErrors } from "../rfcu";
+import {
+  automationContractErrors,
+  extractOrBuildRfEntries,
+  manualInstructions,
+  rfCuContractErrors,
+  technicalActionInstruction,
+  technicalInstruction,
+} from "../rfcu";
 import { loadE2EPrompt } from "../prompts/loader";
 import { E2E_CONTRACT_VERSION } from "../e2e-contract";
 import {
@@ -58,14 +65,12 @@ function expandToCuUnits(entries: RfEntry[]): CuUnit[] {
 }
 
 function requireRfCuInputActionContract(entries: RfEntry[]): void {
-  const errors = entries.flatMap((rf) =>
-    rf.cases.flatMap((cu) => inputActionContractErrors(rf.id, cu))
-  );
+  const errors = rfCuContractErrors(entries);
   if (errors.length === 0) return;
   throw new Error(
-    "rf-cu.md no permite generar evidencias independientes para todos los controles con datos de prueba:\n- " +
+    "rf-cu.md no mantiene un contrato coherente entre acciones humanas y automatización:\n- " +
       errors.join("\n- ") +
-      "\nEjecuta autoCompleteRfCu para declarar input/select/checkbox, separar cada interacción y añadir `acción NN` a cada control."
+      "\nEjecuta autoCompleteRfCu para regenerar las acciones manuales y su `Contrato de automatización`."
   );
 }
 
@@ -232,7 +237,7 @@ function helperApiSummary(): string {
     "- `setNumericFieldValue(fieldSelector, value)`: igual para campos numéricos (usa `input:not([type=hidden])`).",
     "- `setValueByFormControl(componentSelector, formControlName, value)`: rellena `[formcontrolname=...] input`.",
     "- `setDocumentedInput(...)`: implementación especializada de input usada internamente por `setDocumentedControl`; no la llames directamente con el contrato actual.",
-    "- `setDocumentedControl(evidenceKey, controlType, selector, value, screenshotBaseName)`: helper canónico para TODO control declarado en `Valores de controles`. Delega de forma segura en input/select/checkbox, valida el valor/estado visible tras cualquier re-render y genera la captura integrada.",
+    "- `setDocumentedControl(evidenceKey, controlType, selector, value, screenshotBaseName)`: helper canónico para cada operación `set-control` del contrato. Delega de forma segura en input/select/checkbox, valida el valor/estado visible tras cualquier re-render y genera la captura integrada.",
     "- `scrollIntoViewForEvidence(rootSelector)`: lleva un elemento al centro útil del viewport y comprueba que queda visible antes de interactuar con él.",
     "- `assertControlEnabled(rootSelector)`: afirma que un control (nativo O custom `empresas-ui-*`) está HABILITADO. Resuelve el `<input>/<select>/<button>` nativo interno; si es un web component sin nativo interno, comprueba ausencia de `disabled`/`aria-disabled`/clase `disabled`. RECIBE UN SELECTOR STRING (nunca un subject/chainable). ÚSALO SIEMPRE en lugar de `.should('be.enabled')` sobre un wrapper custom (el pseudo `:enabled` NO matchea web components y CUELGA).",
     "- `assertControlDisabled(rootSelector)`: idéntico pero afirma DESHABILITADO. RECIBE UN SELECTOR STRING. ÚSALO en vez de `.should('be.disabled')` sobre wrappers custom.",
@@ -536,19 +541,28 @@ function buildRfFocusedFileList(sources: FrontendSource[], entry: RfEntry, maxFi
 function formatCasesForPrompt(entry: RfEntry): string {
   return entry.cases
     .map((cu) => {
-      const steps = cu.steps.map((step, index) => `     ${index + 1}. ${step}`).join("\n");
+      const steps = manualInstructions(cu).map((step, index) => `     ${index + 1}. ${step}`).join("\n");
+      const automation = cu.actions
+        ? [
+            "   Plan técnico derivado (cada operación conserva el número de su acción humana):",
+            ...cu.actions.map(
+              (action, index) =>
+                `   - Acción técnica ${String(index + 1).padStart(2, "0")}: ${technicalActionInstruction(action)}`
+            ),
+          ].join("\n")
+        : "";
       const inputs = cu.inputValues === undefined
-        ? "   Valores de controles: no declarados (documento legacy; conserva los valores literales que aparezcan en los pasos)."
+        ? "   Controles técnicos: no declarados (documento legacy)."
         : cu.inputValues.length === 0
-          ? "   Valores de controles: ninguno."
+          ? "   Operaciones set-control para baseline: ninguna."
           : [
-              "   Valores de controles (contrato exacto rf-cu.md ↔ spec ↔ baseline ↔ captura):",
+              "   Operaciones set-control derivadas (contrato exacto ↔ spec ↔ baseline ↔ captura):",
               ...cu.inputValues.map(
                 (input) =>
                   `   - clave baseline \`${input.key}\` | tipo \`${input.kind ?? "sin-tipo"}\` | selector \`${input.selector}\` | valor \`${input.value}\` | acción \`${String(input.actionNumber ?? 0).padStart(2, "0")}\``
               ),
             ].join("\n");
-      return `- ${cu.id}: ${cu.name}\n   Clave baseline: "${entry.id}.${cu.id}"\n${inputs}\n   Pasos:\n${steps}`;
+      return `- ${cu.id}: ${cu.name}\n   Clave baseline: "${entry.id}.${cu.id}"\n   Acciones manuales (finalidad funcional; no copies sus nombres visibles como selectores):\n${steps}\n${automation}\n${inputs}`;
     })
     .join("\n");
 }
@@ -557,6 +571,16 @@ function formatScreenshotContract(entry: RfEntry): string {
   return entry.cases
     .flatMap((cu) =>
       actionScreenshots(entry, cu).map((screenshot) => {
+        const operation = screenshot.operation;
+        if (operation?.kind === "set-control") {
+          return `- Evidencia ${screenshot.evidenceIndex + 1} — acción humana ${screenshot.actionIndex + 1}, operación ${operation.id}: ` +
+            `\`setDocumentedControl(${JSON.stringify(operation.key)}, ${JSON.stringify(operation.controlType)}, ${JSON.stringify(operation.selector)}, ${JSON.stringify(operation.value)}, ${JSON.stringify(screenshot.baseName)});\` ` +
+            "(captura integrada; NO añadas otro cy.screenshot)";
+        }
+        if (operation) {
+          return `- Evidencia ${screenshot.evidenceIndex + 1} — acción humana ${screenshot.actionIndex + 1}, operación ${operation.id} (${technicalInstruction(operation)}): ` +
+            `\`cy.screenshot("${screenshot.baseName}", { capture: "viewport", overwrite: true });\``;
+        }
         const input = cu.inputValues?.find(
           (candidate) => candidate.actionNumber === screenshot.actionIndex + 1
         );
@@ -633,7 +657,7 @@ function buildE2EGenerationPrompt(params: {
     "- Reutiliza los helpers compartidos importándolos de `../support/e2e-helpers` (NO reimplementes utilidades):",
     helperApiSummary(),
     "- Estructura: un `describe` para el RF, un `beforeEach` que haga `cy.visit(APP_URL)` + `dismissKnownOverlays()`, y un ÚNICO `it` para el CU de ESTE fichero (cada CU vive en su propio spec; NO añadas otros CU ni `it` adicionales). Nombre del `it`: `\"<CU-id> <nombre>\"`, en español.",
-    "- **EVIDENCIAS DOCUMENTALES POR ACCIÓN (OBLIGATORIO)**: debe existir UNA captura por cada acción numerada, en el mismo orden, y la imagen debe demostrar visualmente la acción descrita. Toda acción asociada a `Valores de controles` usa la llamada exacta `setDocumentedControl(clave, tipo, selector, valor, screenshotBaseName)`: para input, select/dropdown y checkbox el helper espera cualquier re-render, vuelve a llevar el control al viewport, comprueba el valor/estado DOM, lo resalta y captura el dato visible. NO añadas un segundo screenshot. Para acciones sin control documentado, llama a `cy.screenshot` inmediatamente después de completar/verificar la acción. No agrupes interacciones ni capturas al final. No añadas extensión: Cypress genera el `.png` nativo.",
+    "- **EVIDENCIAS DOCUMENTALES POR OPERACIÓN (OBLIGATORIO)**: las acciones humanas expresan la finalidad y pueden contener varias operaciones técnicas. Genera UNA captura por cada operación del plan técnico, exactamente en el orden indicado. Cada set-control usa la llamada literal setDocumentedControl de cinco argumentos y su captura integrada; las demás operaciones llaman a cy.screenshot inmediatamente después de completarse. No agrupes varias operaciones antes de una misma evidencia.",
     "- **RESOLUCIÓN DE EVIDENCIAS**: el proyecto queda configurado a 1920x1080 con escala/DPR 1 (100 %). NO uses nunca `cy.viewport()` ni cambies el zoom: cy.viewport sólo cambia píxeles CSS y NO corrige el DPR físico. Electron recibe el switch mediante ELECTRON_EXTRA_LAUNCH_ARGS; el servidor rechazará cualquier PNG cuyo tamaño físico no sea exactamente 1920x1080.",
     "- **VIEWPORT ANTES DE TODA INTERACCIÓN (OBLIGATORIO)**: antes de click/select/escritura/check sobre CUALQUIER elemento de UI, ese elemento debe entrar completo en el viewport y no quedar tapado por ningún elemento fijo, sticky u overlay. Los helpers compartidos ya lo centran, cierran mediante su UI los banners de consentimiento reconocidos y reintentan de forma acotada si aparecen durante el repintado. PROHIBIDO borrar u ocultar arbitrariamente el elemento que ocluye; ante un bloqueador desconocido, conserva el DOM y usa el diagnóstico del helper. Si el proyecto tiene un banner propio, registra su control de cierre literal una vez con `dismissKnownOverlays(['selector'])`. Para cualquier interacción Cypress directa, llama inmediatamente antes a `scrollIntoViewForEvidence('<selector>')`; NO uses `.scrollIntoView()` directamente porque `be.visible` no detecta oclusiones. Esto es especialmente obligatorio antes de expandir un acordeón. La captura de la acción se toma DESPUÉS, mientras el control accionado sigue expuesto.",
     "- Nombres exactos de las capturas requeridas para este CU:",
@@ -645,8 +669,8 @@ function buildE2EGenerationPrompt(params: {
     "   - Para LEER opciones en escenarios NOMINALES (afirmar que HAY opciones) usa `waitForSelectableOptions('#sociedad').then((opts) => { ... })`, que ESPERA a que se rellenen (son asíncronas). NO uses `getSelectOptions` para eso: leería 0 antes de que Angular renderice las `<option>`.",
     "   - Para LEER opciones en escenarios VACÍOS/negativos usa `getSelectOptions('#sociedad').then((opts) => { ... })`. NUNCA uses `cy.get('#sociedad').find('option')` porque `.find` reintenta hasta que exista una opción y COLGARÁ el test en escenarios vacíos.",
     "   - Para CUALQUIER control declarado usa exclusivamente `setDocumentedControl`; sólo para documentos legacy sin bloque canónico se permiten `setDocumentedInput`, `setInputValue`/`setNumericFieldValue`/`setValueByFormControl` y los helpers legacy de selects. La rama input resuelve el `<input>` interno, usa su setter nativo y crea `input`/`change` con `input.ownerDocument.defaultView.Event` (la misma ventana que la aplicación).",
-    "   - Si rf-cu.md declara `Valores de controles`, usa EXCLUSIVAMENTE la llamada literal de CINCO argumentos indicada en el contrato de capturas: `setDocumentedControl('<clave-baseline>', '<input|select|checkbox>', '<selector>', '<valor>', '<rfx_cuy_NN>')`. Todo coincide CARÁCTER A CARÁCTER con rf-cu.md. En selects, el valor es el TEXTO VISIBLE exacto; en checkbox, `true`/`false`. No uses constantes, valores calculados ni helpers alternativos. El servidor comprueba spec, baseline y evidencia.",
-    "- **UNA INTERACCIÓN POR ACCIÓN/CAPTURA**: está prohibido ejecutar dos escrituras, selecciones, clicks o aperturas de acordeón antes de la misma evidencia. Cada interacción indicada en rf-cu.md se implementa y captura por separado; en particular, cada input o dropdown usa su propia llamada setDocumentedControl y su propia acción.",
+    "   - Para cada operación `set-control`, usa EXCLUSIVAMENTE la llamada literal de CINCO argumentos indicada en el contrato de evidencias: `setDocumentedControl('<clave-baseline>', '<input|select|checkbox>', '<selector>', '<valor>', '<rfx_cuy_NN>')`. Todo procede del bloque técnico y coincide CARÁCTER A CARÁCTER. Las acciones humanas sólo expresan finalidad y textos visibles: NUNCA derives de ellas un selector. En selects, el valor es el TEXTO VISIBLE exacto; en checkbox, `true`/`false`.",
+    "- **UNA INTERACCIÓN TÉCNICA POR EVIDENCIA**: una acción humana puede agrupar varias operaciones relacionadas, pero está prohibido ejecutar dos escrituras, selecciones, clicks o aperturas antes de una misma evidencia. Implementa cada operación técnica por separado; cada control usa su propia llamada setDocumentedControl y captura.",
     "   - **PROHIBIDO reimplementar helpers locales de escritura o usar `clear()`/`type()`/`invoke('val')`/`trigger('input'/'change')` directamente (CORRUPCIÓN `[object Event]`)**: Cypress puede crear esos eventos en una ventana distinta de la aplicación; entonces una comprobación Angular `value instanceof Event` falla y el componente guarda el objeto Event como valor. Importa y usa exclusivamente los helpers compartidos.",
     "   - **ASERCIONES enabled/disabled SOBRE CONTROLES CUSTOM (CAUSA FRECUENTE DE FALLO)**: NUNCA hagas `.should('be.enabled')`/`.should('be.disabled')` directamente sobre un wrapper `empresas-ui-*` (`#pesoAeronave`, `empresas-ui-button`, ...). El pseudo-selector jQuery `:enabled`/`:disabled` SOLO matchea controles nativos (`input/select/textarea/button`), así que sobre un web component NUNCA matchea y el test AGOTA el timeout (`expected '<empresas-ui-input#pesoAeronave...>' to be 'enabled'`). Usa SIEMPRE `assertControlEnabled('#pesoAeronave')` / `assertControlDisabled('#selector')` (resuelven el nativo interno o comprueban `disabled`/`aria-disabled`/clase). Para `have.value`/`have.attr('placeholder')` sobre un control custom, usa `getNativeControl('#id').should('have.attr','placeholder', ...)`, no el wrapper.",
     "   - **NO ASUMAS QUE UN BOTÓN DE ACCIÓN SE DESHABILITA POR UNA VALIDACIÓN/SELECCIÓN INCOMPLETA (CAUSA FRECUENTE DE FALLO)**: en un CU de validación negativa NO stubeado (p. ej. \"seleccionar sociedad pero NO aeropuerto → el botón Descargar está deshabilitado\"), NO des por hecho que el botón queda `disabled`. Muchos botones permanecen HABILITADOS y la validación se manifiesta de OTRA forma (mensaje de error, atributo `viewValidation`/`ng-invalid`/clase de error en el campo, o error al pulsar). Antes de afirmar `assertUiButtonDisabled(...)`: (1) LOCALIZA en la plantilla el binding `[disabled]=\"...\"` (o `[isDisabled]`) del botón y comprueba de qué depende REALMENTE; si NO depende del control que dejaste incompleto (o no existe tal binding), NO afirmes `disabled` (fallarías con `expected false to equal true`). (2) En su lugar, afirma el INDICADOR DE ERROR real que el código renderiza para ese campo (p. ej. `cy.get('#selectAirport').should('have.attr','viewValidation')` / clase de error / mensaje literal presente en el HTML). (3) Mantén la INTENCIÓN del CU (verificar el escenario inválido) pero adáptala al comportamiento REAL observable del código, sin inventar `disabled` ni mensajes que no existan. Regla equivalente para HABILITAR: no asumas que un botón se habilita solo por rellenar un campo si el `[disabled]` depende de más condiciones.",
@@ -2090,8 +2114,8 @@ function screenshotContractError(unit: CuUnit, spec: string): string | undefined
   return (
     `CONTRATO DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: faltan las evidencias ` +
     missing.map((item) => item.baseName).join(", ") +
-    ". Las acciones con datos de control las captura setDocumentedControl con su quinto argumento; " +
-    "las demás usan cy.screenshot inmediatamente después de la acción."
+    ". Las operaciones set-control las captura setDocumentedControl con su quinto argumento; " +
+    "las demás usan cy.screenshot inmediatamente después de la operación."
   );
 }
 
@@ -2187,7 +2211,7 @@ function evidenceSequenceContractError(unit: CuUnit, spec: string): string | und
   return (
     `CONTRATO DE SECUENCIA DE EVIDENCIAS INCUMPLIDO para ${unit.unitId}: ` +
     `se esperaba exactamente ${JSON.stringify(expected)}, pero el spec genera ${JSON.stringify(actual)}. ` +
-    "Debe existir una sola evidencia por acción y en el mismo orden; la evidencia de un control es el quinto argumento de setDocumentedControl."
+    "Debe existir una sola evidencia por operación técnica y en el mismo orden; la evidencia de un control es el quinto argumento de setDocumentedControl."
   );
 }
 
@@ -2338,12 +2362,12 @@ function documentedInputContractError(unit: CuUnit, spec: string): string | unde
   const expected = unit.cu.inputValues;
   if (expected === undefined) return undefined;
 
-  const actionErrors = inputActionContractErrors(unit.rf.id, unit.cu);
+  const actionErrors = automationContractErrors(unit.rf.id, unit.cu);
   if (actionErrors.length > 0) {
     return (
       `CONTRATO RFCU CONTROL/ACCIÓN INCUMPLIDO para ${unit.unitId}:\n- ` +
       actionErrors.join("\n- ") +
-      "\nRegenera/completa rf-cu.md: cada input/select/checkbox debe declarar tipo, valor y una acción independiente."
+      "\nRegenera/completa rf-cu.md: cada operación técnica debe enlazar una acción humana y declarar sus datos exactos."
     );
   }
 
@@ -2361,13 +2385,26 @@ function documentedInputContractError(unit: CuUnit, spec: string): string | unde
 
   const actual = calls as string[][];
   const screenshots = actionScreenshots(unit.rf, unit.cu);
-  const expectedCalls = expected.map((input) => [
-    input.key,
-    input.kind as string,
-    input.selector,
-    input.value,
-    screenshots[(input.actionNumber as number) - 1].baseName,
-  ]);
+  const expectedCalls = unit.cu.actions
+    ? screenshots
+        .filter((screenshot) => screenshot.operation?.kind === "set-control")
+        .map((screenshot) => {
+          const operation = screenshot.operation!;
+          return [
+            operation.key as string,
+            operation.controlType as string,
+            operation.selector as string,
+            operation.value as string,
+            screenshot.baseName,
+          ];
+        })
+    : expected.map((input) => [
+        input.key,
+        input.kind as string,
+        input.selector,
+        input.value,
+        screenshots[(input.actionNumber as number) - 1].baseName,
+      ]);
   const same =
     actual.length === expectedCalls.length &&
     actual.every((args, index) =>

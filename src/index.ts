@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadContext } from "./config";
-import { autoCompleteRfCu, buildRfCuPrompt } from "./rfcu";
+import { autoCompleteRfCu, buildRfCuPrompt, validateRfCuFile } from "./rfcu";
 import { generateRestTests } from "./generators/rest";
 import { generateE2ETests, prepareE2EFallback, runE2EFallback, E2EFallbackResult, E2ERunFallbackResult } from "./generators/e2e";
 import { exportETPAsExcel } from "./exporters/excel";
@@ -464,19 +464,27 @@ function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
 registerToolCompat(
   server,
   "autoCompleteRfCu",
-  "SOLO edita/rellena rf-cu.md. Cada CU debe declarar en `Valores de controles` todos los input/select/checkbox con su tipo, clave de baseline, selector, valor literal y acción NN; en selects se usa el texto visible y en checkbox true/false. No puede indicar `Ninguno` si selecciona un dropdown. Cada interacción ocupa una acción independiente. NO genera tests ni ejecuta Cypress. Si el cliente no soporta sampling, devuelve al agente el prompt completo integrado.",
+  "SOLO edita/rellena o valida rf-cu.md. Cada CU separa `Acciones para ejecución manual` (sin selectores ni detalles Cypress) y un `Contrato de automatización` estructurado. Todo input, fecha, hora o dropdown debe mostrar su valor literal en la acción humana. Toda operación técnica referencia una acción humana y comparte sus etiquetas, valores y resultados; una acción humana puede agrupar varias operaciones atómicas. NO genera tests ni ejecuta Cypress. Si el cliente no soporta sampling, devuelve al agente el prompt completo integrado y exige una segunda llamada con validateOnly=true.",
   {
     requirementsPath: z.string().optional(),
     assisted: z.boolean().optional(),
+    validateOnly: z.boolean().optional(),
   },
-  async ({ requirementsPath, assisted }) => {
+  async ({ requirementsPath, assisted, validateOnly }) => {
     const context = await loadContext();
+    if (validateOnly) {
+      const result = await validateRfCuFile(context, requirementsPath);
+      return asToolResult(
+        `rf-cu válido en ${result.outputPath}: ${result.count} RF, acciones humanas con valores literales y contrato técnico coherente.`
+      );
+    }
     if (assisted || !clientSupportsSampling()) {
       const { outputPath, prompt } = await buildRfCuPrompt(context, requirementsPath);
       return asToolResult(
         [
           "⚠️ MODO ASISTIDO: este cliente MCP no soporta 'sampling/createMessage', por lo que autoCompleteRfCu no puede generar el contenido por sí mismo.",
           "Genera TÚ (el agente) el rf-cu.md siguiendo EXACTAMENTE el prompt de abajo y escríbelo en la ruta indicada.",
+          "Después de escribirlo, llama OBLIGATORIAMENTE otra vez a autoCompleteRfCu con validateOnly=true y el mismo requirementsPath. Corrige y repite hasta que la validación pase; no presentes el documento antes.",
           "",
           `Ruta de salida (escribe aquí el markdown): ${outputPath}`,
           "",
@@ -506,7 +514,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "generateE2ETests",
-  "Genera y EJECUTA tests Cypress CU a CU hasta verde. Acepta `rf` para limitar el ciclo a un RF. Fija viewport 1920x1080 y escala/DPR 1 (100 %), y rechaza PNG que no midan exactamente 1920x1080. Todos los datos declarados en `Valores de controles` se establecen mediante setDocumentedControl: input, select/dropdown y checkbox se vuelven a localizar, entran en viewport, se valida su valor/estado visible, se resaltan y se capturan en rfx_cuy_NN; además coinciden con e2e-baseline.json. No considera completo un CU sin spec vigente, green:true, contrato actual, llamadas y PNG Full HD. Rechaza rf-cu antiguos, dropdowns no documentados, acciones agrupadas o evidencias genéricas. Sin sampling devuelve instrucciones autónomas integradas. El progreso queda en disco.",
+  "Genera y EJECUTA tests Cypress CU a CU hasta verde. Acepta `rf` para limitar el ciclo a un RF. Consume el `Contrato de automatización` enlazado a las acciones humanas: una acción puede agrupar varias operaciones, pero cada interacción y evidencia sigue siendo atómica. Los set-control usan setDocumentedControl y coinciden con baseline; las instrucciones manuales nunca se usan como selectores. Fija viewport 1920x1080 y escala/DPR 1, valida PNG y estado green. Sin sampling devuelve instrucciones autónomas integradas. El progreso queda en disco.",
   {
     promptOverride: z.string().optional(),
     runTests: z.boolean().optional(),
@@ -545,7 +553,7 @@ registerToolCompat(
 
     if (result.skippedGreenCount > 0) {
       lines.push(
-        `Omitidos ${result.skippedGreenCount} CU completos (spec, green: true y una captura PNG por acción).`
+        `Omitidos ${result.skippedGreenCount} CU completos (spec, green: true y una captura PNG por operación).`
       );
     }
 
@@ -617,7 +625,7 @@ registerToolCompat(
 registerToolCompat(
   server,
   "exportETPAsWord",
-  "Genera un ETP Word desde rf-cu.md, con un encabezado por RF, un subencabezado por CU y cada acción seguida de su captura PNG de Cypress. Exige que todos los CU estén en verde y que exista una evidencia por acción; si falta alguna, devuelve un error en vez de crear un documento incompleto.",
+  "Genera un ETP Word desde rf-cu.md, con un encabezado por RF, un subencabezado por CU y las acciones escritas exclusivamente para humanos. Bajo cada acción agrupa sus capturas Cypress sin mostrar selectores ni instrucciones técnicas. Exige todos los CU en verde y una evidencia por operación.",
   {
     outputFileName: z.string().optional(),
   },

@@ -3,7 +3,7 @@
  * Incrementarla obliga a reejecutar los CU que estaban verdes con una versión
  * anterior, en lugar de reutilizar resultados incompatibles.
  */
-export const E2E_CONTRACT_VERSION = 11;
+export const E2E_CONTRACT_VERSION = 12;
 
 export interface E2EStatusLike {
   green?: unknown;

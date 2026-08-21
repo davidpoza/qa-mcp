@@ -45,14 +45,60 @@ export interface McpQaConfig {
 export interface CuCase {
   id: string;
   name: string;
+  /**
+   * Contrato v2: una acción funcional escrita para una persona y las
+   * operaciones técnicas que materializan exactamente esa misma finalidad.
+   */
+  actions?: CuAction[];
+  /** Líneas del contrato v2 que parecían operaciones pero no se pudieron interpretar. */
+  automationParseErrors?: string[];
+  /** Proyección manual/compatibilidad con rf-cu.md v1. */
   steps: string[];
   /**
    * Valores literales de los controles con datos de prueba que utiliza el CU.
-   * Incluye input/textarea, select/dropdown y checkbox. `undefined`
-   * identifica documentos antiguos sin el bloque canónico; `[]` significa que
-   * el CU declara explícitamente que no utiliza controles con valor/estado.
+   * En contrato v2 es una vista derivada de actions[].automation; se conserva
+   * para baseline y compatibilidad. `undefined` identifica documentos legacy
+   * sin declaración canónica.
    */
   inputValues?: CuInputValue[];
+}
+
+export type CuAutomationOperationKind =
+  | "visit"
+  | "set-control"
+  | "click"
+  | "open"
+  | "verify"
+  | "wait";
+
+export interface CuAutomationOperation {
+  /** Identificador estable dentro del CU, p. ej. A02.1. */
+  id: string;
+  /** Acción manual (base 1) cuya finalidad implementa. */
+  actionNumber: number;
+  kind: CuAutomationOperationKind;
+  /** Nombre comprensible del control, botón, vista o resultado. */
+  label: string;
+  /** Selector CSS literal cuando la operación actúa sobre el DOM. */
+  selector?: string;
+  /** Ruta, URL, alias o destino cuando no corresponde un selector DOM. */
+  target?: string;
+  /** Clave estable de baseline para operaciones set-control. */
+  key?: string;
+  controlType?: "input" | "select" | "checkbox";
+  /** Valor canónico exacto que utilizará Cypress. */
+  value?: string;
+  /** Resultado observable esperado para verify/wait. */
+  expected?: string;
+}
+
+export interface CuAction {
+  /** A01, A02...; coincide con la numeración manual. */
+  id: string;
+  /** Instrucción sin selectores ni detalles internos de Cypress. */
+  manual: string;
+  /** Una o varias operaciones técnicas derivadas de la misma acción. */
+  automation: CuAutomationOperation[];
 }
 
 export interface CuInputValue {

@@ -79,7 +79,7 @@ En clientes CON sampling no hace falta ni el bucle manual ni los subtasks: `gene
 - `rf` (string, opcional): limita estrictamente todo el ciclo a un único RF, p. ej. `"RF-3"`. Es la opción recomendada para ejecutar una tarea/contexto independiente por RF.
 - `rfFilter` (array de ids, opcional): compatibilidad para limitar a varios RF, p. ej. `["RF-01","RF-03"]`. No se combina con `rf`.
 - `promptOverride` (string, opcional).
-Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar. Cada acción definida en `rf-cu.md` genera una captura: `rf1_cu1_01.png`, `rf1_cu1_02.png`, etc. El número siempre usa dos dígitos. Si Cypress necesita reintentar un test, el MCP reconoce el sufijo `(attempt N)`, selecciona el último intento y sólo lo acepta si contiene el juego completo antes de normalizarlo a los nombres documentales estables; nunca mezcla evidencias de intentos distintos ni reutiliza un intento fallido anterior. Todas las evidencias se generan con viewport **1920×1080** y escala/DPR **1 (100 %)**; la tool rechaza cualquier PNG que no mida exactamente 1920×1080. Para Electron el MCP pasa `--force-device-scale-factor=1` mediante la variable oficial `ELECTRON_EXTRA_LAUNCH_ARGS`; para Chrome/Edge usa `before:browser:launch`, y para Firefox fija `layout.css.devPixelsPerPx=1.0`. `cy.viewport()` está prohibido porque sólo cambia píxeles CSS y no normaliza el DPR físico. Cada interacción de UI debe ocupar una acción independiente. Todo input, select/dropdown o checkbox con datos de prueba usa `setDocumentedControl`: establece el dato exacto, espera los re-renderizados, cierra mediante su UI los banners de consentimiento reconocidos, vuelve a localizar el control, lo centra en el viewport y comprueba dinámicamente que su rectángulo completo no queda ocluido. La comprobación reintenta de forma acotada si un banner aparece durante el repintado, pero nunca elimina nodos desconocidos del DOM; una oclusión no reconocida falla con un diagnóstico del elemento bloqueante. Los proyectos pueden registrar un control de cierre adicional con `dismissKnownOverlays([selector])`, y ese selector se reutiliza durante el resto de las interacciones. Después verifica el valor/estado real, lo resalta y toma el PNG. Para interacciones directas se exige `scrollIntoViewForEvidence(selector)`; `.scrollIntoView()` no se admite porque `be.visible` puede aceptar elementos ocluidos. En un select la evidencia muestra el texto visible elegido, no el `value` sintético de Angular. Para las demás acciones el spec llama a `cy.screenshot()` después de completarlas. Un CU sólo se considera completamente verde cuando el spec contiene todas las evidencias, existen todos sus PNG a resolución Full HD y los datos del baseline coinciden con `rf-cu.md`; los verdes antiguos se revalidan con cada cambio incompatible.
+Entre cada intento se limpian las claves de baseline del CU en curso para que la re-ejecución vuelva a autocapturar. El contrato v2 separa acciones humanas y operaciones técnicas: una acción humana puede agrupar varios controles relacionados, pero Cypress ejecuta y captura cada operación de forma independiente (`rf1_cu1_01.png`, `rf1_cu1_02.png`, etc.). Si Cypress reintenta un test, el MCP reconoce `(attempt N)`, exige que el último intento tenga el juego completo y normaliza los nombres sin mezclar intentos. Todas las evidencias deben medir **1920×1080** con DPR **1 (100 %)**. Los `set-control` usan `setDocumentedControl`, que aplica el dato exacto, espera re-renderizados, resuelve controles nativos, centra el elemento, comprueba oclusiones, verifica el estado visible y captura el PNG. Las demás operaciones usan `cy.screenshot()` tras completarse. Un CU sólo queda verde con spec vigente, contrato coherente, baseline correcto y todas sus evidencias Full HD.
 
 ### Un contexto por RF
 
@@ -109,30 +109,34 @@ La tool acepta opcionalmente `outputFileName`; si no se indica, escribe `ETP.xls
 
 ## Exportación del ETP a Word
 
-`exportETPAsWord` construye el documento a partir de `rf-cu.md`: crea un encabezado de nivel 1 por cada RF y, dentro de él, un encabezado de nivel 2 por cada CU. Para cada acción incluye el texto definido en `rf-cu.md` y su captura PNG (`rfx_cuy_NN.png`). Los RF, CU y acciones siguen orden natural.
+`exportETPAsWord` construye el documento a partir de `rf-cu.md`: crea un encabezado de nivel 1 por cada RF y, dentro de él, un encabezado de nivel 2 por cada CU. Sólo muestra las acciones para ejecución manual; nunca exporta componentes, selectores ni instrucciones Cypress. Bajo cada acción agrupa uno o varios PNG (`rfx_cuy_NN.png`), uno por operación técnica. Los RF, CU y acciones siguen orden natural.
 
-El Word sólo se exporta si todos los CU están en verde y existe una captura PNG válida por cada acción. Si falta alguna evidencia, la tool devuelve un error con los CU y ficheros pendientes en vez de generar un documento incompleto. Ejecuta antes `generateE2ETests` hasta completar el conjunto.
+El Word sólo se exporta si todos los CU están en verde y existe una captura PNG válida por cada operación. Si falta alguna evidencia, la tool devuelve un error con los CU y ficheros pendientes en vez de generar un documento incompleto. Ejecuta antes `generateE2ETests` hasta completar el conjunto.
 
 Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no usa plantillas ni heurísticas de dominio) y es **UI-first**: los RF/CU describen **lo que el usuario puede reproducir DESDE LA UI**, no la API completa.
 - **Con `frontend.root` configurado (modo UI-first):** los **RF** se derivan de lo que la UI expone (rutas de `appRouting`, componentes/pantallas y acciones que el usuario puede disparar) y los **CU** son los flujos concretos ejercitables desde la interfaz. OpenAPI se usa **solo como referencia** para entender el comportamiento, **no** como checklist de cobertura: no se crea un RF por endpoint ni se prueban casos que la UI no permite. La cobertura exhaustiva de la API es tarea de `generateRestTests`.
 - **Sin `frontend.root` (modo fallback OpenAPI-first):** `frontend.root` es **opcional**; si no se define, no hay UI que analizar y los **RF se infieren directamente de los endpoints de OpenAPI** (un RF por operación/funcionalidad relevante), con CU a nivel de comportamiento esperado del endpoint.
 - Los **CU** los **estima el modelo del cliente** analizando el código frontend real (componentes, plantillas, servicios), vía **MCP sampling** (`sampling/createMessage`).
-- Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+). Sin sampling, la tool devuelve el prompt para que el agente del cliente genere y escriba `rf-cu.md` (modo asistido; ver arriba).
+- Requiere un cliente MCP que soporte sampling (p. ej. VS Code Copilot 1.102+). Sin sampling, la tool devuelve el prompt para que el agente del cliente genere y escriba `rf-cu.md`; después debe llamar a `autoCompleteRfCu` con `validateOnly: true` y corregir el documento hasta que el servidor lo acepte.
 - El prompt de instrucciones está externalizado en `prompts/rfcu.md` (configurable con `prompts.rfcu` en `mcp.config.json`, opcional). Si no se indica, usa el `prompts/rfcu.md` del servidor MCP.
 - Si ya existe un `rf-cu.md` parcial, se completa respetando lo ya definido.
-- Cada CU declara obligatoriamente todos los controles con datos de prueba: `<input>`, `<textarea>`, `<select>`/dropdown y checkbox. El bloque canónico contiene clave, tipo, selector CSS, valor exacto y acción. En selects se documenta el texto visible; en checkbox, `true`/`false`. No puede declararse `Ninguno` si el CU selecciona, escribe o marca algún control:
+- Cada CU contiene dos proyecciones enlazadas: `Acciones para ejecución manual`, que alimenta Excel/Word y no expone selectores ni Cypress, y un `Contrato de automatización` estructurado que alimenta los tests. Una acción humana puede agrupar varias operaciones, pero cada operación conserva su selector, valor y evidencia independiente:
+- Toda acción manual indica el valor literal de cada campo: fecha, hora, número, texto y texto visible exacto de cada dropdown. Expresiones como «una opción disponible», «un valor válido» o «indicar la fecha y la hora» se rechazan. Datepicker, timepicker y textarea se registran técnicamente como `input`; `set-control` sólo admite `input`, `select` y `checkbox`.
 
 ```markdown
 - **CU-1: Cálculo nominal.**
-  - **Valores de controles:**
-    - `sociedad` | tipo `select` | selector `#sociedad` | valor `Org. Ventas de AASA` | acción `02`
-    - `pesoAeronave` | tipo `input` | selector `#pesoAeronave` | valor `180000` | acción `03`
-  1. Acceder al formulario de cálculo.
-  2. Seleccionar `Org. Ventas de AASA` en `#sociedad`.
-  3. Introducir `180000` en `#pesoAeronave`.
+  - **Acciones para ejecución manual:**
+  1. Acceder al Simulador de facturas.
+  2. Seleccionar «Org. Ventas de AASA» en Sociedad e introducir 180000 en Peso de la aeronave.
+  3. Comprobar que Importe total muestra el importe calculado.
+  - **Contrato de automatización:**
+    - `A01.1` | acción `01` | operación `visit` | etiqueta `Simulador de facturas` | destino `/simulador-de-facturas`
+    - `A02.1` | acción `02` | operación `set-control` | clave `sociedad` | tipo `select` | etiqueta `Sociedad` | selector `#sociedad` | valor `Org. Ventas de AASA`
+    - `A02.2` | acción `02` | operación `set-control` | clave `pesoAeronave` | tipo `input` | etiqueta `Peso de la aeronave` | selector `#pesoAeronave input` | valor `180000`
+    - `A03.1` | acción `03` | operación `verify` | etiqueta `Importe total` | selector `#importeTotal` | resultado `muestra el importe calculado`
 ```
 
-Los `rf-cu.md` creados con el contrato anterior —incluidos los que declaraban `Ninguno` aunque seleccionasen dropdowns— deben pasar una vez más por `autoCompleteRfCu`. `generateE2ETests` los rechaza en lugar de producir capturas sin los datos usados. Al cambiar el contrato E2E, los CU verdes anteriores también se revalidan.
+Los documentos v1 siguen siendo legibles durante la migración, pero `autoCompleteRfCu` genera exclusivamente el contrato v2. Los CU verdes anteriores se revalidan porque cambia la relación entre acciones y evidencias.
 
 La generación E2E incluye baseline autocapturable de snapshots genéricos (API/UI):
 - asegura Cypress en el frontend (`devDependencies.cypress`) y scripts `e2e` / `e2e:open`

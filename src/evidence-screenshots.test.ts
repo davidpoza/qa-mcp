@@ -123,6 +123,50 @@ test("persiste el juego completo del retry y no mezcla intentos", async (t) => {
   }
 });
 
+test("genera una evidencia por operación y conserva la acción humana padre", () => {
+  const groupedCu: CuCase = {
+    id: "CU-2",
+    name: "Valores agrupados",
+    steps: ["Introducir 15000 en Peso y 120 en Pasajeros.", "Comprobar Importe total visible."],
+    actions: [
+      {
+        id: "A01",
+        manual: "Introducir 15000 en Peso y 120 en Pasajeros.",
+        automation: [
+          {
+            id: "A01.1", actionNumber: 1, kind: "set-control", key: "peso",
+            controlType: "input", label: "Peso", selector: "#peso input", value: "15000",
+          },
+          {
+            id: "A01.2", actionNumber: 1, kind: "set-control", key: "pasajeros",
+            controlType: "input", label: "Pasajeros", selector: "#pasajeros input", value: "120",
+          },
+        ],
+      },
+      {
+        id: "A02",
+        manual: "Comprobar Importe total visible.",
+        automation: [
+          {
+            id: "A02.1", actionNumber: 2, kind: "verify", label: "Importe total",
+            selector: "#total", expected: "visible",
+          },
+        ],
+      },
+    ],
+  };
+
+  const screenshots = actionScreenshots(rf, groupedCu);
+  assert.deepEqual(
+    screenshots.map((item) => [item.fileName, item.actionIndex, item.operationIndex, item.operation?.id]),
+    [
+      ["rf2_cu2_01.png", 0, 0, "A01.1"],
+      ["rf2_cu2_02.png", 0, 1, "A01.2"],
+      ["rf2_cu2_03.png", 1, 0, "A02.1"],
+    ]
+  );
+});
+
 test("rechaza evidencias repartidas entre intentos incompletos", async (t) => {
   const { frontendRoot, context } = await makeWorkspace(t);
   const expected = actionScreenshots(rf, cu);

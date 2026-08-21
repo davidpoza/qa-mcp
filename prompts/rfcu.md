@@ -35,17 +35,28 @@ Formato de salida OBLIGATORIO (respétalo carácter a carácter):
    `- **CU-1: <nombre>.**`
    `- **CU-2: <nombre>.**`
    `- **CU-3: <nombre>.**` (y así sucesivamente si aplica)
-5. Inmediatamente debajo del título de CADA CU, declara los valores exactos de TODOS los controles que aportan datos o estado a la prueba (`<input>`, `<textarea>`, `<select>`/dropdown y checkbox), usando este bloque canónico:
-   `  - **Valores de controles:**`
-       - `<clave-baseline>` | tipo `<input|select|checkbox>` | selector `<selector-css-literal>` | valor `<valor-literal>` | acción `<NN>`
-   Repite la segunda línea por cada control diferente. En `select`, el valor es el TEXTO VISIBLE exacto de la opción; en `checkbox`, `true` o `false`. `NN` es la acción que establece o verifica EXCLUSIVAMENTE ese control. La clave debe ser estable, el selector debe existir LITERALMENTE en el frontend y el valor debe ser exacto. Si el CU no utiliza controles con valor/estado, usa:
-   `  - **Valores de controles:**`
-   `    - Ninguno.`
-6. Dentro de cada CU, pasos de prueba numerados (mínimo 4), indentados con dos espacios:
-   `  1. <acción>`
-   `  2. <acción>`
-   `  3. <acción>`
-   `  4. <acción>`
+5. Inmediatamente debajo del título de CADA CU escribe las instrucciones destinadas a una persona:
+   `  - **Acciones para ejecución manual:**`
+   `  1. <acción humana>`
+   `  2. <acción humana>`
+   `  3. <acción humana>`
+   `  4. <acción humana>`
+   Deben ser pasos concretos y verificables, usando EXCLUSIVAMENTE textos, etiquetas, opciones, botones, secciones y estados que una persona ve en pantalla. Resuelve las claves i18n contra los ficheros de traducción proporcionados: la clave interna tampoco es texto visible. PROHIBIDO mostrar IDs/clases/selectores CSS, atributos, tags o nombres de componentes (`app-*`, `empresas-ui-*`), tipos HTML (`input`, `select`, `checkbox`), rutas/URLs, claves i18n, helpers, aliases o eventos `input`/`change`.
+   Para TODO campo editable o seleccionable, la acción humana debe indicar su etiqueta visible Y el valor literal concreto: fechas (`15/01/2025`), horas (`10:00`), números, textos y el texto visible exacto de cada opción de dropdown. PROHIBIDO escribir «una opción disponible», «un valor válido», «la primera opción», «indicar la fecha y la hora» o equivalentes sin valores.
+6. Después de las acciones manuales incluye el registro técnico estructurado:
+   `  - **Contrato de automatización:**`
+   Cada operación referencia el número de la acción humana cuya finalidad implementa. Su campo `etiqueta` debe ser el texto o nombre VISIBLE que utiliza también la instrucción humana; el selector/destino queda sólo en esta sección técnica. Usa identificadores `ANN.M`, donde `NN` es la acción manual y `M` la operación dentro de ella:
+   Ejemplos de líneas válidas (en el resultado final van como bullets normales, sin esta valla):
+   ```text
+    - `A01.1` | acción `01` | operación `visit` | etiqueta `Simulador de facturas` | destino `/empresas-facturacion/simulador-de-facturas`
+    - `A02.1` | acción `02` | operación `set-control` | clave `pesoAeronave` | tipo `input` | etiqueta `Peso de la aeronave` | selector `#pesoAeronave input` | valor `15000`
+    - `A03.1` | acción `03` | operación `click` | etiqueta `Calcular importe` | selector `empresas-ui-button`
+    - `A03.2` | acción `03` | operación `wait` | etiqueta `Indicador de carga` | destino `@calcularImporte` | resultado `deja de mostrarse`
+    - `A04.1` | acción `04` | operación `verify` | etiqueta `Importe total` | selector `#importeTotal` | resultado `muestra el importe calculado`
+   ```
+   Una acción humana puede agrupar varios controles relacionados; crea entonces varias operaciones (`A02.1`, `A02.2`...) con la misma acción `02`. Cada elemento interactuado mantiene su operación y evidencia propias.
+   `set-control` admite EXCLUSIVAMENTE los tipos técnicos `input`, `select` y `checkbox`. Un datepicker, timepicker o textarea se documenta como tipo `input`, usando un selector que permita al helper resolver su control nativo. Nunca inventes tipos `datepicker`, `timepicker`, `dropdown` o `textarea`.
+   NO conserves ni generes el bloque legacy `Valores de controles`: `Contrato de automatización` es la única fuente técnica.
 
 Reglas:
 
@@ -65,14 +76,15 @@ Reglas:
   4. Verificar el importe/resultado ESPECÍFICO de esa subsección y su contribución al total.
   Un RF que agrupa varias subsecciones (p. ej. "servicios aeronáuticos" o "complementarios") debe, por tanto, tener **un CU por cada subacordeón/servicio**, además de los CU transversales (nominal global, cambio de contexto, error/vacío). No te quedes en el nivel del acordeón padre.
 - Cada CU debe ser **ejecutable**: pasos concretos y verificables (acciones sobre la UI, verificaciones de API/UI, registro de evidencia), no descripciones genéricas.
-- **DATOS DE PRUEBA OBLIGATORIOS Y LITERALES**: cada paso que escriba, seleccione, marque o deje explícitamente un control sin selección debe mencionar el MISMO valor literal declarado en `Valores de controles`. Está prohibido declarar `Ninguno` si el CU elige sociedad, aeropuerto, categoría, idioma u otra opción. También están prohibidas expresiones ambiguas como "un valor válido" o "la primera opción": documenta el texto visible concreto. Si el mismo control cambia varias veces, crea entradas con claves distintas y sufijo secuencial.
-- **UNA SOLA INTERACCIÓN DE UI POR ACCIÓN (CRÍTICO PARA LAS CAPTURAS)**: no agrupes dos selecciones, escrituras, clicks o expansiones en el mismo paso numerado. Cada escritura de input debe ocupar su PROPIA acción, y el campo `acción <NN>` de su declaración debe apuntar a ella. Por ejemplo, escribir peso, pasajeros y pasajeros en conexión son TRES acciones consecutivas, nunca una sola acción con tres escrituras. Aplica la misma separación a dos dropdowns o dos botones: cada elemento interactuado necesita su acción y su screenshot independiente.
-- Los valores declarados constituyen el contrato con Cypress, las capturas y `cypress/fixtures/e2e-baseline.json`: `setDocumentedControl` debe establecer exactamente cada input/select/checkbox, mostrarlo en su PNG y almacenarlo bajo `inputs` con la misma clave.
+- **UNA FINALIDAD, DOS PROYECCIONES**: el texto manual y las operaciones técnicas NO son dos fuentes independientes. Toda operación referencia una acción humana; esa acción debe mencionar literalmente las mismas etiquetas visibles, valores y resultados, pero nunca componentes, selectores, destinos ni detalles internos. No dejes acciones sin operaciones ni operaciones huérfanas.
+- **DATOS DE PRUEBA OBLIGATORIOS Y LITERALES**: cada control escrito, seleccionado o marcado genera una operación `set-control` con clave, tipo, etiqueta humana, selector y valor exactos. Si una acción enlaza N operaciones `set-control`, su texto manual debe contener las N etiquetas visibles y los N valores literales (salvo el booleano técnico de checkbox). Están prohibidas expresiones ambiguas como "un valor válido", "una opción disponible", "la primera opción" o "indicar la fecha y la hora" sin concretarlas. Para checkbox, `true`/`false` sólo aparece en el contrato técnico: la acción humana dice «Marcar/Activar» o «Desmarcar/Desactivar» seguido de la etiqueta visible. Si el mismo control cambia varias veces, crea claves distintas con sufijo secuencial.
+- **AGRUPACIÓN HUMANA, ATOMICIDAD TÉCNICA**: una persona puede recibir una acción como «Introducir 15000 en Peso, 120 en Pasajeros y 30 en Pasajeros en conexión». El contrato contendrá tres operaciones enlazadas a esa misma acción. Cypress ejecutará y capturará cada operación de forma independiente.
+- Los valores estructurados constituyen el contrato con Cypress, las capturas y `cypress/fixtures/e2e-baseline.json`: `setDocumentedControl` debe establecer exactamente cada control y almacenarlo bajo `inputs` con la misma clave.
 - Redacción en **español**, directa y verificable.
 - Si se entrega un `rf-cu.md` existente parcial, **complétalo** respetando lo ya definido (no reescribas lo correcto; añade CU/pasos que falten y RF no cubiertos).
 - Devuelve **ÚNICAMENTE** el contenido markdown final del fichero, sin explicaciones, sin comentarios y sin vallas de código (` ``` `).
 
-Antes de devolver el resultado, **verifica que CADA RF contiene 2 o más CU** y que el **número de CU varía entre RF** (no todos con la misma cantidad); si algún RF quedó corto o el recuento es uniforme, añade los CU adicionales que correspondan según las dimensiones de prueba anteriores y la evidencia del frontend. **Verifica además que, para cada RF cuya pantalla tenga subsecciones anidadas (subacordeones, pestañas, paneles, componentes hijos repetidos), existe un CU DEDICADO por cada subsección hoja con campos/cálculo/resultado propios**; si algún subacordeón real quedó sin su CU específico, añádelo (no dejes subsecciones cubiertas solo de forma agregada). Finalmente, verifica que TODOS los CU contienen `Valores de controles`, que cada input/select/checkbox usado aparece con tipo, selector, valor y acción exactos, que ninguna acción interactúa con más de un elemento y que no queda ningún dato ambiguo.
+Antes de devolver el resultado, **verifica que CADA RF contiene 2 o más CU** y que el **número de CU varía entre RF** (no todos con la misma cantidad); si algún RF quedó corto o el recuento es uniforme, añade los CU adicionales que correspondan según las dimensiones de prueba anteriores y la evidencia del frontend. **Verifica además que, para cada RF cuya pantalla tenga subsecciones anidadas (subacordeones, pestañas, paneles, componentes hijos repetidos), existe un CU DEDICADO por cada subsección hoja con campos/cálculo/resultado propios**. Finalmente, verifica que TODOS los CU contienen acciones manuales y `Contrato de automatización`, que cada acción tiene al menos una operación, que cada input/select/checkbox aparece con clave, tipo, etiqueta, selector y valor exactos y que no queda ninguna operación huérfana o ambigua.
 
 --- Endpoints OpenAPI (REFERENCIA para entender la API; en MODO UI-FIRST NO es checklist de cobertura; en MODO SIN FRONTEND es la fuente principal de RF) ---
 {OPENAPI_ENDPOINTS}

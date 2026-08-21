@@ -1,10 +1,16 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { CuCase, LoadedContext, RfEntry } from "./types";
+import { CuAutomationOperation, CuCase, LoadedContext, RfEntry } from "./types";
 
 export interface ActionScreenshot {
+  /** Posición global de la evidencia dentro del CU. */
+  evidenceIndex: number;
+  /** Acción humana a la que pertenece. */
   actionIndex: number;
+  /** Operación técnica dentro de la acción humana (v2). */
+  operationIndex: number;
   action: string;
+  operation?: CuAutomationOperation;
   baseName: string;
   fileName: string;
 }
@@ -19,19 +25,35 @@ function evidenceId(value: string, fallback: string): string {
 
 /**
  * Nombres estables compartidos por el generador Cypress y el exportador Word.
- * La primera acción usa el número 01, como en `rf1_cu1_01.png`.
+ * La primera operación usa el número 01, como en `rf1_cu1_01.png`; varias
+ * operaciones pueden pertenecer a una misma acción destinada a humanos.
  */
 export function actionScreenshots(rf: RfEntry, cu: CuCase): ActionScreenshot[] {
-  if (cu.steps.length > 99) {
-    throw new Error(`${rf.id}.${cu.id} define más de 99 acciones; el sufijo de evidencia admite dos dígitos.`);
-  }
   const rfId = evidenceId(rf.id, "rf");
   const cuId = evidenceId(cu.id, "cu");
-  return cu.steps.map((action, actionIndex) => {
-    const baseName = `${rfId}_${cuId}_${String(actionIndex + 1).padStart(2, "0")}`;
+  const units = cu.actions
+    ? cu.actions.flatMap((action, actionIndex) =>
+        action.automation.map((operation, operationIndex) => ({
+          actionIndex,
+          operationIndex,
+          action: action.manual,
+          operation,
+        }))
+      )
+    : cu.steps.map((action, actionIndex) => ({
+        actionIndex,
+        operationIndex: 0,
+        action,
+        operation: undefined,
+      }));
+  if (units.length > 99) {
+    throw new Error(`${rf.id}.${cu.id} define más de 99 evidencias; el sufijo admite dos dígitos.`);
+  }
+  return units.map((unit, evidenceIndex) => {
+    const baseName = `${rfId}_${cuId}_${String(evidenceIndex + 1).padStart(2, "0")}`;
     return {
-      actionIndex,
-      action,
+      evidenceIndex,
+      ...unit,
       baseName,
       fileName: `${baseName}.png`,
     };

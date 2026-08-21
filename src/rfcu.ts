@@ -1,6 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { CuCase, LoadedContext, RfEntry } from "./types";
+import {
+  CuAction,
+  CuAutomationOperation,
+  CuAutomationOperationKind,
+  CuCase,
+  LoadedContext,
+  RfEntry,
+} from "./types";
 
 /**
  * Firma de la función de muestreo LLM (MCP sampling).
@@ -19,7 +26,7 @@ function rfHeaderRegex(): RegExp {
 }
 
 function cuRegex(): RegExp {
-  return /^-\s+\*\*(CU-\d+):\s+(.+)\.\*\*/;
+  return /^\s*-\s+\*\*(CU-\d+):\s+(.+)\.\*\*/;
 }
 
 function stepRegex(): RegExp {
@@ -28,6 +35,46 @@ function stepRegex(): RegExp {
 
 function inputValuesHeaderRegex(): RegExp {
   return /^\s*-\s+\*\*Valores de (?:controles|inputs):\*\*\s*$/i;
+}
+
+function automationHeaderRegex(): RegExp {
+  return /^\s*-\s+\*\*Contrato de automatización:\*\*\s*$/i;
+}
+
+function manualActionsHeaderRegex(): RegExp {
+  return /^\s*-\s+\*\*Acciones para ejecución manual:\*\*\s*$/i;
+}
+
+function automationOperationRegex(): RegExp {
+  return /^\s+-\s+`([^`]+)`\s+\|\s+(.+)\s*$/;
+}
+
+function parseAutomationOperation(line: string): CuAutomationOperation | undefined {
+  const match = line.match(automationOperationRegex());
+  if (!match) return undefined;
+  const [, id, fieldsText] = match;
+  const fields = new Map<string, string>();
+  for (const token of fieldsText.split(/\s+\|\s+/)) {
+    const field = token.match(/^([^`]+?)\s+`([^`]*)`\s*\.?$/);
+    if (!field) return undefined;
+    fields.set(field[1].trim().toLowerCase(), field[2]);
+  }
+  const actionNumber = Number(fields.get("acción"));
+  const kind = fields.get("operación") as CuAutomationOperationKind | undefined;
+  const label = fields.get("etiqueta");
+  if (!Number.isInteger(actionNumber) || !kind || !label) return undefined;
+  return {
+    id: id.trim(),
+    actionNumber,
+    kind,
+    label,
+    selector: fields.get("selector"),
+    target: fields.get("destino"),
+    key: fields.get("clave"),
+    controlType: fields.get("tipo") as "input" | "select" | "checkbox" | undefined,
+    value: fields.get("valor"),
+    expected: fields.get("resultado"),
+  };
 }
 
 function inputValueRegex(): RegExp {
@@ -47,6 +94,7 @@ export function parseRfCu(content: string): RfEntry[] {
   const rfEntries: RfEntry[] = [];
   let currentRf: RfEntry | undefined;
   let currentCuIndex = -1;
+  let inAutomationContract = false;
 
   for (const line of lines) {
     const rfMatch = line.match(rfHeaderRegex());
@@ -58,6 +106,7 @@ export function parseRfCu(content: string): RfEntry[] {
       currentRf = { id, name, methodPath, operationId, cases: [] };
       rfEntries.push(currentRf);
       currentCuIndex = -1;
+      inAutomationContract = false;
       continue;
     }
 
@@ -66,12 +115,45 @@ export function parseRfCu(content: string): RfEntry[] {
       const [, id, name] = cuMatch;
       currentRf.cases.push({ id, name, steps: [] });
       currentCuIndex = currentRf.cases.length - 1;
+      inAutomationContract = false;
       continue;
     }
 
     if (inputValuesHeaderRegex().test(line) && currentRf && currentCuIndex >= 0) {
       currentRf.cases[currentCuIndex].inputValues = [];
+      inAutomationContract = false;
       continue;
+    }
+
+    if (automationHeaderRegex().test(line) && currentRf && currentCuIndex >= 0) {
+      currentRf.cases[currentCuIndex].actions = [];
+      inAutomationContract = true;
+      continue;
+    }
+
+    if (manualActionsHeaderRegex().test(line) && currentRf && currentCuIndex >= 0) {
+      inAutomationContract = false;
+      continue;
+    }
+
+    if (inAutomationContract && currentRf && currentCuIndex >= 0) {
+      const operation = parseAutomationOperation(line);
+      if (operation) {
+        const cu = currentRf.cases[currentCuIndex];
+        const actionId = `A${String(operation.actionNumber).padStart(2, "0")}`;
+        let action = cu.actions?.find((candidate) => candidate.id === actionId);
+        if (!action) {
+          action = { id: actionId, manual: "", automation: [] };
+          cu.actions?.push(action);
+        }
+        action.automation.push(operation);
+        continue;
+      }
+      if (/^\s+-\s+/.test(line)) {
+        const cu = currentRf.cases[currentCuIndex];
+        (cu.automationParseErrors ??= []).push(line.trim());
+        continue;
+      }
     }
 
     const inputValueMatch = line.match(inputValueRegex());
@@ -100,7 +182,336 @@ export function parseRfCu(content: string): RfEntry[] {
     }
   }
 
+  for (const rf of rfEntries) {
+    for (const cu of rf.cases) {
+      if (!cu.actions) continue;
+      const parsedActions = cu.actions;
+      cu.actions = cu.steps.map((manual, index): CuAction => {
+        const id = `A${String(index + 1).padStart(2, "0")}`;
+        return {
+          id,
+          manual,
+          automation: parsedActions.find((action) => action.id === id)?.automation ?? [],
+        };
+      });
+      // Conserva también referencias a acciones inexistentes para que la
+      // validación las rechace explícitamente; nunca descartes silenciosamente
+      // una operación técnica huérfana.
+      const validActionIds = new Set(cu.actions.map((action) => action.id));
+      cu.actions.push(
+        ...parsedActions.filter((action) => !validActionIds.has(action.id))
+      );
+      // inputValues queda como vista derivada para baseline y compatibilidad,
+      // pero ya no es una segunda fuente de verdad en documentos v2.
+      cu.inputValues = cu.actions.flatMap((action) =>
+        action.automation
+          .filter((operation) => operation.kind === "set-control")
+          .map((operation) => ({
+            key: operation.key ?? "",
+            kind: operation.controlType,
+            selector: operation.selector ?? "",
+            value: operation.value ?? "",
+            actionNumber: operation.actionNumber,
+          }))
+      );
+    }
+  }
+
   return rfEntries;
+}
+
+function normalizedInstruction(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[`“”"']/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function technicalReference(value: string): string | undefined {
+  const patterns: Array<[RegExp, string]> = [
+    [/(^|\s)[#.][a-z_][\w-]*/i, "selector CSS"],
+    [/\b[a-z][\w-]*:(?:nth|first|last|has|not|checked|disabled|visible)[\w(.-]*/i, "selector CSS"],
+    [/\[[^\]]*(?:=|formcontrol|data-|aria-)[^\]]*\]/i, "atributo técnico"],
+    [/<\/?[a-z][\w-]*[^>]*>/i, "tag HTML"],
+    [/\b(?:app|empresas-ui)-[a-z0-9-]+\b/i, "nombre de componente"],
+    [/\b(?:mat|ion|ng|p)-[a-z0-9-]+\b/i, "nombre de componente"],
+    [/\b[a-z][\w-]*(?:\.[a-z][\w-]*)+\b/i, "clave interna o i18n"],
+    [/\b[a-z]+(?:[A-Z][a-zA-Z0-9]*)+\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b/, "identificador interno"],
+    [/\b(?:input|select|checkbox|textarea|button|option|fieldset|formcontrolname)\b/i, "tipo de control técnico"],
+    [/\b(?:cy\.|setDocumented\w*|getNativeControl|scrollIntoViewForEvidence)\b/i, "helper de automatización"],
+    [/(^|\s)@[a-z_][\w-]*/i, "alias técnico"],
+    [/(^|\s)\/\/[a-z*]|\b(?:xpath|data-cy|data-testid)\b/i, "selector técnico"],
+    [/https?:\/\/\S+|(^|\s)\/[a-z0-9][\w./-]*/i, "ruta o URL técnica"],
+  ];
+  return patterns.find(([pattern]) => pattern.test(value))?.[1];
+}
+
+function operationVerbPattern(kind: CuAutomationOperationKind): RegExp {
+  switch (kind) {
+    case "visit":
+      return /\b(?:acceder|abrir|navegar|ir|entrar)\b/i;
+    case "set-control":
+      return /\b(?:introducir|ingresar|escribir|rellenar|seleccionar|elegir|marcar|desmarcar|establecer|indicar)\b/i;
+    case "click":
+      return /\b(?:pulsar|presionar|hacer clic|accionar|seleccionar)\b/i;
+    case "open":
+      return /\b(?:abrir|desplegar|expandir|mostrar)\b/i;
+    case "verify":
+      return /\b(?:comprobar|verificar|confirmar|validar|observar)\b/i;
+    case "wait":
+      return /\b(?:esperar|comprobar|verificar|observar)\b/i;
+  }
+}
+
+function ambiguousControlValue(value: string): boolean {
+  const normalized = normalizedInstruction(value);
+  return [
+    /\b(?:un|una)\s+(?:valor|opcion|fecha|hora)\s+(?:valido|valida|disponible|cualquiera)\b/,
+    /\b(?:el|la)\s+(?:primer|primera)\s+(?:valor|opcion)(?:\s+disponible)?\b/,
+    /\b(?:fecha|hora)\s+(?:valida|disponible|cualquiera)\b/,
+    /\bindicar\s+la\s+fecha\s+y\s+la\s+hora\b/,
+    /^(?:tbd|todo|por definir|pendiente|<[^>]+>)$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function operationFields(operation: CuAutomationOperation): string[] {
+  return [
+    `acción \`${String(operation.actionNumber).padStart(2, "0")}\``,
+    `operación \`${operation.kind}\``,
+    ...(operation.key ? [`clave \`${operation.key}\``] : []),
+    ...(operation.controlType ? [`tipo \`${operation.controlType}\``] : []),
+    `etiqueta \`${operation.label}\``,
+    ...(operation.selector ? [`selector \`${operation.selector}\``] : []),
+    ...(operation.target ? [`destino \`${operation.target}\``] : []),
+    ...(operation.value !== undefined ? [`valor \`${operation.value}\``] : []),
+    ...(operation.expected ? [`resultado \`${operation.expected}\``] : []),
+  ];
+}
+
+/** Render determinista de una operación para el bloque técnico de rf-cu.md. */
+export function formatAutomationOperation(operation: CuAutomationOperation): string {
+  return `    - \`${operation.id}\` | ${operationFields(operation).join(" | ")}`;
+}
+
+/** Descripción técnica derivada; nunca se persiste como una segunda narración libre. */
+export function technicalInstruction(operation: CuAutomationOperation): string {
+  switch (operation.kind) {
+    case "set-control": {
+      const verb = operation.controlType === "select"
+        ? "Seleccionar"
+        : operation.controlType === "checkbox"
+          ? "Establecer"
+          : "Ingresar";
+      const eventHint = operation.controlType === "input"
+        ? " disparando los eventos input y change mediante setDocumentedControl"
+        : " mediante setDocumentedControl";
+      return `${verb} el valor ${JSON.stringify(operation.value ?? "")} en ${operation.selector ?? "(sin selector)"}${eventHint}.`;
+    }
+    case "visit":
+      return `Navegar a ${operation.target ?? operation.selector ?? operation.label}.`;
+    case "click":
+      return `Pulsar ${operation.label} usando ${operation.selector ?? operation.target ?? "el objetivo documentado"}.`;
+    case "open":
+      return `Abrir ${operation.label} usando ${operation.selector ?? operation.target ?? "el objetivo documentado"}.`;
+    case "verify":
+      return `Verificar ${operation.label} en ${operation.selector ?? operation.target ?? "la UI"}: ${operation.expected ?? "resultado observable"}.`;
+    case "wait":
+      return `Esperar ${operation.label} en ${operation.target ?? operation.selector ?? "el flujo"}: ${operation.expected ?? "respuesta esperada"}.`;
+  }
+}
+
+/** Plan técnico agrupado por acción humana, derivado de sus operaciones atómicas. */
+export function technicalActionInstruction(action: CuAction): string {
+  if (
+    action.automation.length > 0 &&
+    action.automation.every(
+      (operation) => operation.kind === "set-control" && operation.controlType === "input"
+    )
+  ) {
+    const clauses = action.automation.map(
+      (operation) => `el valor ${JSON.stringify(operation.value ?? "")} en ${operation.selector ?? "(sin selector)"}`
+    );
+    const joined = clauses.length === 1
+      ? clauses[0]
+      : `${clauses.slice(0, -1).join(", ")} y ${clauses.at(-1)}`;
+    return `Ingresar ${joined} disparando los eventos input y change mediante setDocumentedControl.`;
+  }
+  return action.automation.map(technicalInstruction).join(" ");
+}
+
+/** Única proyección permitida para Excel/Word: nunca contiene campos técnicos. */
+export function manualInstructions(cu: CuCase): string[] {
+  return cu.actions?.map((action) => action.manual) ?? cu.steps;
+}
+
+export function automationContractErrors(rfId: string, cu: CuCase): string[] {
+  if (!cu.actions) return inputActionContractErrors(rfId, cu);
+  const errors: string[] = (cu.automationParseErrors ?? []).map(
+    (line) => `${rfId}.${cu.id}: operación técnica mal formada: ${line}`
+  );
+  const operationIds = new Set<string>();
+  const controlKeys = new Set<string>();
+  const allowedKinds = new Set<CuAutomationOperationKind>([
+    "visit", "set-control", "click", "open", "verify", "wait",
+  ]);
+
+  if (cu.actions.length !== cu.steps.length) {
+    errors.push(`${rfId}.${cu.id}: las acciones manuales y el contrato estructurado no tienen la misma longitud`);
+  }
+  if (cu.actions.length === 0) {
+    errors.push(`${rfId}.${cu.id}: no define ninguna acción para ejecución manual`);
+  }
+  cu.actions.forEach((action, actionIndex) => {
+    const expectedActionNumber = actionIndex + 1;
+    const label = `${rfId}.${cu.id} acción ${String(expectedActionNumber).padStart(2, "0")}`;
+    if (action.id !== `A${String(expectedActionNumber).padStart(2, "0")}`) {
+      errors.push(`${label}: id técnico ${action.id} no coincide con su número manual`);
+    }
+    if (action.automation.length === 0) {
+      errors.push(`${label}: no tiene ninguna operación en \`Contrato de automatización\``);
+      return;
+    }
+    const manual = normalizedInstruction(action.manual);
+    const exposedTechnicalReference = technicalReference(action.manual);
+    if (exposedTechnicalReference) {
+      errors.push(`${label}: la instrucción humana expone un ${exposedTechnicalReference}; usa sólo textos o elementos visibles`);
+    }
+    if (ambiguousControlValue(action.manual)) {
+      errors.push(
+        `${label}: la instrucción humana usa un valor ambiguo; indica el valor literal de cada input, fecha, hora y opción seleccionada`
+      );
+    }
+    for (const [operationIndex, operation] of action.automation.entries()) {
+      const expectedOperationId = `${action.id}.${operationIndex + 1}`;
+      if (operation.id !== expectedOperationId) {
+        errors.push(`${label}: se esperaba la operación ${expectedOperationId}, pero aparece ${operation.id}`);
+      }
+      if (operationIds.has(operation.id)) errors.push(`${label}: operación duplicada ${operation.id}`);
+      operationIds.add(operation.id);
+      if (operation.actionNumber !== expectedActionNumber) {
+        errors.push(`${label}: ${operation.id} referencia la acción ${operation.actionNumber}`);
+      }
+      if (!allowedKinds.has(operation.kind)) {
+        errors.push(`${label}: ${operation.id} usa la operación no soportada ${operation.kind}`);
+      }
+      if (
+        allowedKinds.has(operation.kind) &&
+        !operationVerbPattern(operation.kind).test(normalizedInstruction(action.manual))
+      ) {
+        errors.push(`${label}: la finalidad humana no corresponde con la operación técnica ${operation.kind} de ${operation.id}`);
+      }
+      if (!operation.label || !manual.includes(normalizedInstruction(operation.label))) {
+        errors.push(`${label}: debe mencionar literalmente la etiqueta humana \`${operation.label}\` de ${operation.id}`);
+      }
+      const technicalLabel = technicalReference(operation.label);
+      if (technicalLabel) {
+        errors.push(`${label}: la etiqueta \`${operation.label}\` de ${operation.id} parece un ${technicalLabel}, no un texto visible`);
+      }
+      if (operation.selector && manual.includes(normalizedInstruction(operation.selector))) {
+        errors.push(`${label}: la instrucción humana no debe exponer el selector técnico \`${operation.selector}\``);
+      }
+      if (operation.target && manual.includes(normalizedInstruction(operation.target))) {
+        errors.push(`${label}: la instrucción humana no debe exponer el destino técnico \`${operation.target}\``);
+      }
+      if (/\bdispar(?:a|ar|ando).*\beventos?\b|\b(?:input|change)\s+y\s+(?:input|change)\b/i.test(action.manual)) {
+        errors.push(`${label}: la instrucción humana no debe describir eventos internos de Cypress`);
+      }
+
+      if (operation.kind === "set-control") {
+        if (
+          !operation.key ||
+          !operation.controlType ||
+          !operation.selector ||
+          operation.value === undefined ||
+          operation.value.trim().length === 0
+        ) {
+          errors.push(`${label}: ${operation.id} set-control requiere clave, tipo, etiqueta, selector y valor`);
+        }
+        if (
+          operation.controlType &&
+          !["input", "select", "checkbox"].includes(operation.controlType)
+        ) {
+          errors.push(`${label}: ${operation.id} usa el tipo de control no soportado ${operation.controlType}`);
+        }
+        if (operation.key) {
+          if (controlKeys.has(operation.key)) errors.push(`${label}: clave de control duplicada ${operation.key}`);
+          controlKeys.add(operation.key);
+        }
+        if (operation.value !== undefined && ambiguousControlValue(operation.value)) {
+          errors.push(
+            `${label}: ${operation.id} declara el valor ambiguo \`${operation.value}\`; usa el valor literal que ejecutarán la persona y Cypress`
+          );
+        }
+        if (operation.controlType === "checkbox" && operation.value !== undefined) {
+          const expectedStateVerb = operation.value === "true"
+            ? /\b(?:marcar|activar|seleccionar)\b/i
+            : operation.value === "false"
+              ? /\b(?:desmarcar|desactivar)\b/i
+              : undefined;
+          if (!expectedStateVerb) {
+            errors.push(`${label}: ${operation.id} checkbox sólo admite valor true o false`);
+          } else if (!expectedStateVerb.test(normalizedInstruction(action.manual))) {
+            errors.push(
+              `${label}: la acción humana debe ${operation.value === "true" ? "marcar/activar" : "desmarcar/desactivar"} ` +
+                `la etiqueta visible \`${operation.label}\` sin exponer el booleano técnico`
+            );
+          }
+        } else if (operation.value !== undefined && !manual.includes(normalizedInstruction(operation.value))) {
+          errors.push(`${label}: debe mencionar el valor humano \`${operation.value}\` de ${operation.id}`);
+        }
+      } else if (["click", "open"].includes(operation.kind) && !operation.selector) {
+        errors.push(`${label}: ${operation.id} ${operation.kind} requiere selector`);
+      } else if (operation.kind === "visit" && !operation.target) {
+        errors.push(`${label}: ${operation.id} visit requiere destino`);
+      } else if (operation.kind === "verify") {
+        if (!operation.selector && !operation.target) {
+          errors.push(`${label}: ${operation.id} verify requiere selector o destino`);
+        }
+        if (!operation.expected) errors.push(`${label}: ${operation.id} ${operation.kind} requiere resultado`);
+        else if (!manual.includes(normalizedInstruction(operation.expected))) {
+          errors.push(`${label}: debe mencionar el resultado humano \`${operation.expected}\` de ${operation.id}`);
+        }
+      } else if (operation.kind === "wait") {
+        if (!operation.target) errors.push(`${label}: ${operation.id} wait requiere destino`);
+        if (!operation.expected) errors.push(`${label}: ${operation.id} ${operation.kind} requiere resultado`);
+        else if (!manual.includes(normalizedInstruction(operation.expected))) {
+          errors.push(`${label}: debe mencionar el resultado humano \`${operation.expected}\` de ${operation.id}`);
+        }
+      }
+    }
+  });
+  return errors;
+}
+
+/** Valida unicidad documental y el contrato funcional/técnico de cada CU. */
+export function rfCuContractErrors(entries: RfEntry[]): string[] {
+  const errors: string[] = [];
+  const rfIds = new Set<string>();
+  for (const rf of entries) {
+    const normalizedRfId = rf.id.toLowerCase();
+    if (rfIds.has(normalizedRfId)) {
+      errors.push(`RF duplicado: ${rf.id}`);
+    }
+    rfIds.add(normalizedRfId);
+    if (rf.cases.length === 0) {
+      errors.push(`${rf.id}: no contiene ningún CU reconocible`);
+      continue;
+    }
+    const cuIds = new Set<string>();
+    for (const cu of rf.cases) {
+      const normalizedCuId = cu.id.toLowerCase();
+      if (cuIds.has(normalizedCuId)) {
+        errors.push(`${rf.id}: CU duplicado: ${cu.id}`);
+      }
+      cuIds.add(normalizedCuId);
+      errors.push(...automationContractErrors(rf.id, cu));
+    }
+  }
+  if (entries.length === 0) errors.push("No se reconoció ningún RF en el documento");
+  return errors;
 }
 
 /**
@@ -300,8 +711,11 @@ async function listFrontendSourceFiles(root: string): Promise<string[]> {
           continue;
         }
         await walk(fullPath);
-      } else if (/\.(ts|html)$/i.test(entry.name) && !/\.spec\.ts$/i.test(entry.name)) {
-        output.push(fullPath);
+      } else {
+        const isSource = /\.(ts|html)$/i.test(entry.name) && !/\.spec\.ts$/i.test(entry.name);
+        const isTranslation = /\.json$/i.test(entry.name) &&
+          /(?:i18n|locale|locales|translation|translations|assets[\\/](?:lang|i18n))/i.test(fullPath);
+        if (isSource || isTranslation) output.push(fullPath);
       }
     }
   };
@@ -318,6 +732,7 @@ function rankFrontendFile(filePath: string): number {
   const lower = filePath.toLowerCase();
   let score = 0;
   if (/routing|routes/.test(lower)) score += 6;
+  if (/\.json$/.test(lower) && /i18n|locale|translation|assets[\\/](?:lang|i18n)/.test(lower)) score += 8;
   if (/\.component\.(ts|html)$/.test(lower)) score += 5;
   if (/(page|view|screen|container)/.test(lower)) score += 4;
   if (/\.service\.ts$/.test(lower)) score += 3;
@@ -480,19 +895,106 @@ export async function buildRfCuPrompt(
   const prompt = [
     basePrompt.trimEnd(),
     "",
-    "--- CONTRATO INVARIANTE DE DATOS DE PRUEBA (OBLIGATORIO, incluso si prompts.rfcu es personalizado) ---",
-    "Debajo del título de CADA CU incluye exactamente `  - **Valores de controles:**`.",
-    "Por cada input, textarea, select/dropdown o checkbox cuyo valor/estado intervenga en el CU, añade una línea con este formato exacto:",
-    "    - `<clave-baseline>` | tipo `<input|select|checkbox>` | selector `<selector-css-literal>` | valor `<valor-literal>` | acción `<NN>`",
-    "En selects documenta el TEXTO VISIBLE exacto de la opción; en checkbox usa `true` o `false`. Usa una clave única, un selector literal del frontend y el número de dos dígitos de la acción que establece o verifica EXCLUSIVAMENTE ese control.",
-    "Cada interacción de UI debe ser una acción independiente: nunca agrupes varios inputs, dropdowns, clicks o acordeones en un mismo paso, porque cada elemento necesita su propia captura.",
-    "Si el CU no utiliza ningún control con valor/estado, añade exactamente `    - Ninguno.`. No uses expresiones ambiguas como «un valor válido» ni omitas dropdowns por no ser inputs de texto.",
-    "Este bloque es el contrato que generateE2ETests validará contra setDocumentedControl, las capturas y e2e-baseline.json.",
+    "--- CONTRATO INVARIANTE DE ACCIONES V2 (OBLIGATORIO, incluso si prompts.rfcu es personalizado) ---",
+    "Dentro de CADA CU escribe primero `  - **Acciones para ejecución manual:**` con pasos numerados que usen EXCLUSIVAMENTE textos, etiquetas, opciones, botones, secciones y estados que una persona ve en pantalla.",
+    "En las acciones humanas están PROHIBIDOS selectores/IDs/clases CSS, atributos, tags o nombres de componentes (app-*, empresas-ui-*), tipos HTML (input/select/checkbox), rutas/URLs, claves i18n, aliases, helpers y eventos internos. Resuelve las claves i18n con los ficheros de traducción incluidos en el contexto.",
+    "Para TODO campo editable o seleccionable, la acción humana indica la etiqueta VISIBLE y el valor LITERAL: fecha, hora, número, texto o texto visible exacto de la opción. PROHIBIDO usar `una opción disponible`, `un valor válido`, `la primera opción`, `indicar la fecha y la hora` o equivalentes sin concretar.",
+    "Después escribe exactamente `  - **Contrato de automatización:**` y una línea por cada operación técnica vinculada al número de la acción humana.",
+    "Formato set-control:     - `A02.1` | acción `02` | operación `set-control` | clave `pesoAeronave` | tipo `input` | etiqueta `Peso de la aeronave` | selector `#pesoAeronave input` | valor `15000`.",
+    "Formatos restantes: operación `visit` (etiqueta + destino), `click`/`open` (etiqueta + selector), `verify` (etiqueta + selector o destino + resultado) y `wait` (etiqueta + destino + resultado).",
+    "Una acción humana PUEDE agrupar varios controles relacionados; en ese caso crea A02.1, A02.2, A02.3, todos con acción `02`. Cada operación genera su propia evidencia técnica.",
+    "Si una acción enlaza N operaciones set-control, debe mencionar las N etiquetas visibles y los N valores literales (salvo true/false de checkbox). La acción humana debe mencionar literalmente las mismas etiquetas VISIBLES, valores y resultados del contrato, pero nunca sus selectores, destinos ni detalles de Cypress. No puede haber acciones humanas sin operaciones ni operaciones huérfanas.",
+    "set-control admite EXCLUSIVAMENTE tipo `input`, `select` o `checkbox`. Datepicker, timepicker y textarea usan tipo técnico `input` con el selector de su control/wrapper real; NO uses los tipos datepicker, timepicker, dropdown ni textarea.",
+    "En selects usa como valor el TEXTO VISIBLE exacto. En checkbox, `true`/`false` queda sólo en el contrato técnico y la acción humana usa Marcar/Activar o Desmarcar/Desactivar con la etiqueta visible. Los eventos input/change se derivan del tipo y NO se escriben en la instrucción humana.",
+    "Este bloque estructurado es la única fuente técnica para generateE2ETests, baseline y capturas; las acciones manuales son su proyección para Excel/Word.",
     "--- FIN CONTRATO INVARIANTE ---",
     "",
   ].join("\n");
 
   return { outputPath, prompt };
+}
+
+/**
+ * Valida el documento v2 completo. Se expone para que el modo asistido pueda
+ * comprobar el fichero escrito por el agente con las mismas reglas que el
+ * modo sampling antes de considerarlo terminado.
+ */
+export function validateRfCuMarkdown(markdown: string): RfEntry[] {
+  const parsed = parseRfCu(markdown);
+  const legacyValueSections = markdown
+    .split(/\r?\n/)
+    .filter((line) => inputValuesHeaderRegex().test(line)).length;
+  if (legacyValueSections > 0) {
+    throw new Error(
+      "El rf-cu.md generado mezcla el contrato v1 `Valores de controles` con el contrato v2. " +
+        "Elimina el bloque legacy: los set-control del `Contrato de automatización` son la única fuente técnica."
+    );
+  }
+  const expectedManualSections = parsed.reduce((total, rf) => total + rf.cases.length, 0);
+  const actualManualSections = markdown
+    .split(/\r?\n/)
+    .filter((line) => manualActionsHeaderRegex().test(line)).length;
+  if (actualManualSections !== expectedManualSections) {
+    throw new Error(
+      `El rf-cu.md generado debe incluir exactamente un bloque \`Acciones para ejecución manual\` por CU ` +
+        `(esperados: ${expectedManualSections}; encontrados: ${actualManualSections}).`
+    );
+  }
+  const actualAutomationSections = markdown
+    .split(/\r?\n/)
+    .filter((line) => automationHeaderRegex().test(line)).length;
+  if (actualAutomationSections !== expectedManualSections) {
+    throw new Error(
+      `El rf-cu.md generado debe incluir exactamente un bloque \`Contrato de automatización\` por CU ` +
+        `(esperados: ${expectedManualSections}; encontrados: ${actualAutomationSections}).`
+    );
+  }
+  const missingActionContracts = parsed.flatMap((rf) =>
+    rf.cases
+      .filter((cu) => cu.actions === undefined)
+      .map((cu) => `${rf.id}.${cu.id}`)
+  );
+  if (missingActionContracts.length > 0) {
+    throw new Error(
+      "El rf-cu.md generado no declara el bloque obligatorio `Contrato de automatización` en: " +
+        missingActionContracts.join(", ") +
+        ". Cada acción manual debe enlazar una o más operaciones técnicas estructuradas."
+    );
+  }
+  const duplicateInputKeys = parsed.flatMap((rf) =>
+    rf.cases.flatMap((cu) => {
+      const keys = cu.inputValues?.map((input) => input.key) ?? [];
+      return new Set(keys).size === keys.length ? [] : [`${rf.id}.${cu.id}`];
+    })
+  );
+  if (duplicateInputKeys.length > 0) {
+    throw new Error(
+      "El rf-cu.md generado repite claves de control dentro de estos CU: " +
+        duplicateInputKeys.join(", ") +
+        ". Cada valor/estado de prueba debe tener una clave de baseline única."
+    );
+  }
+  const contractErrors = rfCuContractErrors(parsed);
+  if (contractErrors.length > 0) {
+    throw new Error(
+      "El rf-cu.md generado permite divergencia entre acciones manuales y automatización:\n- " +
+        contractErrors.join("\n- ")
+    );
+  }
+  return parsed;
+}
+
+export async function validateRfCuFile(
+  context: LoadedContext,
+  requirementsPathOverride?: string
+): Promise<{ outputPath: string; count: number }> {
+  const configRoot = path.dirname(context.configPath);
+  const outputPath = requirementsPathOverride
+    ? path.resolve(process.cwd(), requirementsPathOverride)
+    : context.requirementsPath ?? path.resolve(configRoot, "docs", "rf-cu.md");
+  const markdown = await fs.readFile(outputPath, "utf8");
+  const parsed = validateRfCuMarkdown(markdown);
+  return { outputPath, count: parsed.length };
 }
 
 /**
@@ -516,41 +1018,7 @@ export async function autoCompleteRfCu(
   }
 
   const markdown = sanitizeGeneratedMarkdown(generated);
-  const parsed = parseRfCu(markdown);
-  const missingInputDeclarations = parsed.flatMap((rf) =>
-    rf.cases
-      .filter((cu) => cu.inputValues === undefined)
-      .map((cu) => `${rf.id}.${cu.id}`)
-  );
-  if (missingInputDeclarations.length > 0) {
-    throw new Error(
-      "El rf-cu.md generado no declara el bloque obligatorio `Valores de controles` en: " +
-        missingInputDeclarations.join(", ") +
-        ". Cada CU debe enumerar tipo, clave, selector y valor de todos los controles con datos de prueba, o indicar `Ninguno`."
-    );
-  }
-  const duplicateInputKeys = parsed.flatMap((rf) =>
-    rf.cases.flatMap((cu) => {
-      const keys = cu.inputValues?.map((input) => input.key) ?? [];
-      return new Set(keys).size === keys.length ? [] : [`${rf.id}.${cu.id}`];
-    })
-  );
-  if (duplicateInputKeys.length > 0) {
-    throw new Error(
-      "El rf-cu.md generado repite claves de control dentro de estos CU: " +
-        duplicateInputKeys.join(", ") +
-        ". Cada valor/estado de prueba debe tener una clave de baseline única."
-    );
-  }
-  const inputActionErrors = parsed.flatMap((rf) =>
-    rf.cases.flatMap((cu) => inputActionContractErrors(rf.id, cu))
-  );
-  if (inputActionErrors.length > 0) {
-    throw new Error(
-      "El rf-cu.md generado no garantiza una captura independiente por control con datos de prueba:\n- " +
-        inputActionErrors.join("\n- ")
-    );
-  }
+  const parsed = validateRfCuMarkdown(markdown);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, markdown, "utf8");
 

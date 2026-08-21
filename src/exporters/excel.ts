@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext } from "../types";
 import { collectEvidenceTestCases, EvidenceTestCase } from "../evidence";
+import { extractOrBuildRfEntries, manualInstructions, rfCuContractErrors } from "../rfcu";
 
 const HEADERS = [
   "index",
@@ -47,7 +48,7 @@ function projectApplication(context: LoadedContext, kind: EvidenceTestCase["kind
 }
 
 function testActions(test: EvidenceTestCase): string {
-  const steps = test.cu?.steps ?? [];
+  const steps = test.cu ? manualInstructions(test.cu) : [];
   const numbered = steps.map((step, index) => `${index + 1}. ${step}`).join("\n");
   if (test.kind === "REST") {
     const request = test.rf?.methodPath
@@ -164,6 +165,13 @@ export async function exportETPAsExcel(context: LoadedContext, outputFileName?: 
 
   await fs.mkdir(outputDir, { recursive: true });
   const root = path.dirname(context.configPath);
+  const contractErrors = rfCuContractErrors(extractOrBuildRfEntries(context));
+  if (contractErrors.length > 0) {
+    throw new Error(
+      "No se puede exportar el ETP Excel porque rf-cu.md contiene acciones ambiguas o divergentes:\n- " +
+        contractErrors.join("\n- ")
+    );
+  }
   const tests = (await collectEvidenceTestCases(context)).sort(compareEvidenceTests);
   if (tests.length === 0) {
     throw new Error(

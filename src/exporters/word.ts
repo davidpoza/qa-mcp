@@ -11,7 +11,7 @@ import {
 } from "docx";
 import { actionScreenshots, screenshotEvidenceDirectory } from "../evidence-screenshots";
 import { E2EStatusLike, isCurrentGreenE2EStatus } from "../e2e-contract";
-import { extractOrBuildRfEntries } from "../rfcu";
+import { extractOrBuildRfEntries, manualInstructions, rfCuContractErrors } from "../rfcu";
 import { CuCase, LoadedContext, RfEntry } from "../types";
 
 const naturalOrder = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
@@ -70,7 +70,9 @@ function casesForRf(rf: RfEntry): CuCase[] {
 interface LoadedScreenshot {
   rf: RfEntry;
   cu: CuCase;
+  evidenceIndex: number;
   actionIndex: number;
+  operationIndex: number;
   action: string;
   fileName: string;
   data: Buffer;
@@ -99,10 +101,12 @@ async function loadCompleteEvidence(
         try {
           const data = await fs.readFile(imagePath);
           const dimensions = pngDimensions(data);
-          screenshots.set(`${unitId}.${screenshot.actionIndex}`, {
+          screenshots.set(`${unitId}.${screenshot.evidenceIndex}`, {
             rf,
             cu,
+            evidenceIndex: screenshot.evidenceIndex,
             actionIndex: screenshot.actionIndex,
+            operationIndex: screenshot.operationIndex,
             action: screenshot.action,
             fileName: screenshot.fileName,
             data,
@@ -131,7 +135,7 @@ async function loadCompleteEvidence(
     ].filter(Boolean);
     throw new Error(
       "No se puede exportar un ETP Word incompleto. Ejecuta generateE2ETests hasta que todos los CU " +
-        `estén en verde y exista un PNG por acción. ${details.join(" | ")}`
+        `estén en verde y exista un PNG por operación documentada. ${details.join(" | ")}`
     );
   }
 
@@ -145,6 +149,13 @@ export async function exportETPAsWord(context: LoadedContext, outputFileName?: s
   const entries = sortedEntries(context);
   if (entries.length === 0) {
     throw new Error("No se encontraron RF/CU en rf-cu.md para generar el ETP Word.");
+  }
+  const contractErrors = rfCuContractErrors(entries);
+  if (contractErrors.length > 0) {
+    throw new Error(
+      "No se puede exportar el ETP Word porque rf-cu.md contiene acciones ambiguas o divergentes:\n- " +
+        contractErrors.join("\n- ")
+    );
   }
 
   const screenshots = await loadCompleteEvidence(context, entries);
@@ -182,7 +193,8 @@ export async function exportETPAsWord(context: LoadedContext, outputFileName?: s
         })
       );
 
-      if (cu.steps.length === 0) {
+      const humanActions = manualInstructions(cu);
+      if (humanActions.length === 0) {
         paragraphs.push(
           new Paragraph({
             children: [new TextRun({ text: "Este CU no define acciones en rf-cu.md.", italics: true })],
@@ -191,23 +203,27 @@ export async function exportETPAsWord(context: LoadedContext, outputFileName?: s
         continue;
       }
 
-      for (const screenshot of actionScreenshots(rf, cu)) {
-        const loaded = screenshots.get(`${unitId}.${screenshot.actionIndex}`);
-        if (!loaded) {
-          throw new Error(`No se cargó la evidencia ${screenshot.fileName} de ${unitId}.`);
-        }
+      const evidence = actionScreenshots(rf, cu);
+      for (const [actionIndex, action] of humanActions.entries()) {
+        const actionEvidence = evidence.filter((item) => item.actionIndex === actionIndex);
         paragraphs.push(
           new Paragraph({
             children: [
               new TextRun({
-                text: `Acción ${String(screenshot.actionIndex + 1).padStart(2, "0")}. `,
+                text: `Acción ${String(actionIndex + 1).padStart(2, "0")}. `,
                 bold: true,
               }),
-              new TextRun({ text: screenshot.action }),
+              new TextRun({ text: action }),
             ],
             spacing: { before: 140, after: 100 },
-          }),
-          new Paragraph({
+          })
+        );
+        for (const screenshot of actionEvidence) {
+          const loaded = screenshots.get(`${unitId}.${screenshot.evidenceIndex}`);
+          if (!loaded) {
+            throw new Error(`No se cargó la evidencia ${screenshot.fileName} de ${unitId}.`);
+          }
+          paragraphs.push(new Paragraph({
             children: [
               new ImageRun({
                 type: "png",
@@ -217,13 +233,21 @@ export async function exportETPAsWord(context: LoadedContext, outputFileName?: s
             ],
             alignment: AlignmentType.CENTER,
             spacing: { after: 80 },
-          }),
-          new Paragraph({
-            children: [new TextRun({ text: screenshot.fileName, italics: true, size: 18 })],
+          }));
+          paragraphs.push(new Paragraph({
+            children: [
+              new TextRun({
+                text: actionEvidence.length > 1
+                  ? `Evidencia ${actionIndex + 1}.${screenshot.operationIndex + 1} — ${screenshot.fileName}`
+                  : screenshot.fileName,
+                italics: true,
+                size: 18,
+              }),
+            ],
             alignment: AlignmentType.CENTER,
             spacing: { after: 160 },
-          })
-        );
+          }));
+        }
       }
     }
   });
