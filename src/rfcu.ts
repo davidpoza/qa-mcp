@@ -8,6 +8,12 @@ import {
   LoadedContext,
   RfEntry,
 } from "./types";
+import {
+  buildFrontendControlInventory,
+  formatFrontendControlInventory,
+  frontendControlCoverageErrors,
+  FrontendUiControl,
+} from "./frontend-controls";
 
 /**
  * Firma de la función de muestreo LLM (MCP sampling).
@@ -514,6 +520,23 @@ export function rfCuContractErrors(entries: RfEntry[]): string[] {
   return errors;
 }
 
+export async function rfCuContextContractErrors(
+  context: LoadedContext,
+  entries: RfEntry[]
+): Promise<string[]> {
+  const configRoot = path.dirname(context.configPath);
+  const frontendRoot = context.config.frontend.root
+    ? path.resolve(configRoot, context.config.frontend.root)
+    : undefined;
+  const uiControls = frontendRoot
+    ? await buildFrontendControlInventory(frontendRoot)
+    : [];
+  return [
+    ...rfCuContractErrors(entries),
+    ...frontendControlCoverageErrors(entries, uiControls),
+  ];
+}
+
 /**
  * Valida la relación 1:1 entre controles documentados y acciones. Una acción que
  * escriba varios controles sólo produciría una captura del último, por lo que
@@ -854,7 +877,7 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
 export async function buildRfCuPrompt(
   context: LoadedContext,
   requirementsPathOverride?: string
-): Promise<{ outputPath: string; prompt: string }> {
+): Promise<{ outputPath: string; prompt: string; uiControls: FrontendUiControl[] }> {
   const configRoot = path.dirname(context.configPath);
   const outputPath = requirementsPathOverride
     ? path.resolve(process.cwd(), requirementsPathOverride)
@@ -870,6 +893,10 @@ export async function buildRfCuPrompt(
   const frontendCode = frontendRoot
     ? await buildFrontendCodeBundle(frontendRoot)
     : "(no se configuró frontend.root en mcp.config.json; no hay código de UI que analizar)";
+  const uiControls = frontendRoot
+    ? await buildFrontendControlInventory(frontendRoot)
+    : [];
+  const uiControlInventory = formatFrontendControlInventory(uiControls);
   const existing = (await readTextIfExists(outputPath))?.trim();
 
   const frontSource = routes.length > 0 && routingPath
@@ -905,13 +932,18 @@ export async function buildRfCuPrompt(
     "Una acción humana PUEDE agrupar varios controles relacionados; en ese caso crea A02.1, A02.2, A02.3, todos con acción `02`. Cada operación genera su propia evidencia técnica.",
     "Si una acción enlaza N operaciones set-control, debe mencionar las N etiquetas visibles y los N valores literales (salvo true/false de checkbox). La acción humana debe mencionar literalmente las mismas etiquetas VISIBLES, valores y resultados del contrato, pero nunca sus selectores, destinos ni detalles de Cypress. No puede haber acciones humanas sin operaciones ni operaciones huérfanas.",
     "set-control admite EXCLUSIVAMENTE tipo `input`, `select` o `checkbox`. Datepicker, timepicker y textarea usan tipo técnico `input` con el selector de su control/wrapper real; NO uses los tipos datepicker, timepicker, dropdown ni textarea.",
+    "El INVENTARIO DE CONTROLES UI incluido abajo es un CHECKLIST, no material opcional. Para cada CU que pulse Calcular/Consultar/Buscar/Guardar/Enviar/Aceptar/Continuar, localiza el componente o sección correspondiente al RF e incluye TODOS sus controles editables/seleccionables como set-control con valor literal. En un CU negativo, documenta explícitamente el estado que se verifica. No omitas un control por no aparecer en OpenAPI.",
     "En selects usa como valor el TEXTO VISIBLE exacto. En checkbox, `true`/`false` queda sólo en el contrato técnico y la acción humana usa Marcar/Activar o Desmarcar/Desactivar con la etiqueta visible. Los eventos input/change se derivan del tipo y NO se escriben en la instrucción humana.",
     "Este bloque estructurado es la única fuente técnica para generateE2ETests, baseline y capturas; las acciones manuales son su proyección para Excel/Word.",
     "--- FIN CONTRATO INVARIANTE ---",
     "",
+    "--- INVENTARIO DE CONTROLES UI EXTRAÍDO DEL FRONTEND (CHECKLIST OBLIGATORIO) ---",
+    uiControlInventory,
+    "--- FIN INVENTARIO DE CONTROLES UI ---",
+    "",
   ].join("\n");
 
-  return { outputPath, prompt };
+  return { outputPath, prompt, uiControls };
 }
 
 /**
@@ -919,7 +951,10 @@ export async function buildRfCuPrompt(
  * comprobar el fichero escrito por el agente con las mismas reglas que el
  * modo sampling antes de considerarlo terminado.
  */
-export function validateRfCuMarkdown(markdown: string): RfEntry[] {
+export function validateRfCuMarkdown(
+  markdown: string,
+  uiControls: FrontendUiControl[] = []
+): RfEntry[] {
   const parsed = parseRfCu(markdown);
   const legacyValueSections = markdown
     .split(/\r?\n/)
@@ -974,7 +1009,10 @@ export function validateRfCuMarkdown(markdown: string): RfEntry[] {
         ". Cada valor/estado de prueba debe tener una clave de baseline única."
     );
   }
-  const contractErrors = rfCuContractErrors(parsed);
+  const contractErrors = [
+    ...rfCuContractErrors(parsed),
+    ...frontendControlCoverageErrors(parsed, uiControls),
+  ];
   if (contractErrors.length > 0) {
     throw new Error(
       "El rf-cu.md generado permite divergencia entre acciones manuales y automatización:\n- " +
@@ -993,7 +1031,13 @@ export async function validateRfCuFile(
     ? path.resolve(process.cwd(), requirementsPathOverride)
     : context.requirementsPath ?? path.resolve(configRoot, "docs", "rf-cu.md");
   const markdown = await fs.readFile(outputPath, "utf8");
-  const parsed = validateRfCuMarkdown(markdown);
+  const frontendRoot = context.config.frontend.root
+    ? path.resolve(configRoot, context.config.frontend.root)
+    : undefined;
+  const uiControls = frontendRoot
+    ? await buildFrontendControlInventory(frontendRoot)
+    : [];
+  const parsed = validateRfCuMarkdown(markdown, uiControls);
   return { outputPath, count: parsed.length };
 }
 
@@ -1008,17 +1052,43 @@ export async function autoCompleteRfCu(
   sample: SampleFn,
   requirementsPathOverride?: string
 ): Promise<{ outputPath: string; count: number }> {
-  const { outputPath, prompt } = await buildRfCuPrompt(context, requirementsPathOverride);
+  const { outputPath, prompt, uiControls } = await buildRfCuPrompt(context, requirementsPathOverride);
+  let markdown = "";
+  let parsed: RfEntry[] = [];
+  let validationError: Error | undefined;
+  const maxGenerationAttempts = 3;
 
-  const generated = await sample(prompt, 16000);
-  if (!generated || generated.trim().length === 0) {
-    throw new Error(
-      "El modelo no devolvió contenido para rf-cu.md. Verifica que el cliente MCP soporte sampling (createMessage)."
-    );
+  for (let attempt = 1; attempt <= maxGenerationAttempts; attempt += 1) {
+    const attemptPrompt = attempt === 1
+      ? prompt
+      : [
+          prompt,
+          "",
+          "--- CORRECCIÓN OBLIGATORIA DEL BORRADOR ANTERIOR ---",
+          `El borrador fue rechazado por el validador determinista:\n${validationError?.message ?? "error desconocido"}`,
+          "Corrige TODOS los errores. En particular, contrasta cada CU de cálculo/consulta con el inventario y no omitas ningún input, fecha, hora, dropdown o checkbox de su componente.",
+          "Devuelve otra vez el documento COMPLETO, no un parche ni explicaciones.",
+          "--- BORRADOR RECHAZADO ---",
+          markdown,
+          "--- FIN BORRADOR RECHAZADO ---",
+        ].join("\n");
+    const generated = await sample(attemptPrompt, 16000);
+    if (!generated || generated.trim().length === 0) {
+      throw new Error(
+        "El modelo no devolvió contenido para rf-cu.md. Verifica que el cliente MCP soporte sampling (createMessage)."
+      );
+    }
+    markdown = sanitizeGeneratedMarkdown(generated);
+    try {
+      parsed = validateRfCuMarkdown(markdown, uiControls);
+      validationError = undefined;
+      break;
+    } catch (error) {
+      validationError = error instanceof Error ? error : new Error(String(error));
+      if (attempt === maxGenerationAttempts) throw validationError;
+    }
   }
 
-  const markdown = sanitizeGeneratedMarkdown(generated);
-  const parsed = validateRfCuMarkdown(markdown);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, markdown, "utf8");
 

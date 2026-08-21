@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { LoadedContext } from "../types";
 import { collectEvidenceTestCases, EvidenceTestCase } from "../evidence";
-import { extractOrBuildRfEntries, manualInstructions, rfCuContractErrors } from "../rfcu";
+import { extractOrBuildRfEntries, manualInstructions, rfCuContextContractErrors } from "../rfcu";
 
 const HEADERS = [
   "index",
@@ -165,7 +165,7 @@ export async function exportETPAsExcel(context: LoadedContext, outputFileName?: 
 
   await fs.mkdir(outputDir, { recursive: true });
   const root = path.dirname(context.configPath);
-  const contractErrors = rfCuContractErrors(extractOrBuildRfEntries(context));
+  const contractErrors = await rfCuContextContractErrors(context, extractOrBuildRfEntries(context));
   if (contractErrors.length > 0) {
     throw new Error(
       "No se puede exportar el ETP Excel porque rf-cu.md contiene acciones ambiguas o divergentes:\n- " +

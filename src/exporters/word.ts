@@ -11,7 +11,7 @@ import {
 } from "docx";
 import { actionScreenshots, screenshotEvidenceDirectory } from "../evidence-screenshots";
 import { E2EStatusLike, isCurrentGreenE2EStatus } from "../e2e-contract";
-import { extractOrBuildRfEntries, manualInstructions, rfCuContractErrors } from "../rfcu";
+import { extractOrBuildRfEntries, manualInstructions, rfCuContextContractErrors } from "../rfcu";
 import { CuCase, LoadedContext, RfEntry } from "../types";
 
 const naturalOrder = new Intl.Collator("es", { numeric: true, sensitivity: "base" });
@@ -150,7 +150,7 @@ export async function exportETPAsWord(context: LoadedContext, outputFileName?: s
   if (entries.length === 0) {
     throw new Error("No se encontraron RF/CU en rf-cu.md para generar el ETP Word.");
   }
-  const contractErrors = rfCuContractErrors(entries);
+  const contractErrors = await rfCuContextContractErrors(context, entries);
   if (contractErrors.length > 0) {
     throw new Error(
       "No se puede exportar el ETP Word porque rf-cu.md contiene acciones ambiguas o divergentes:\n- " +

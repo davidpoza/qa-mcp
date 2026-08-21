@@ -122,6 +122,7 @@ Para `autoCompleteRfCu`, la generación es **genérica y guiada por LLM** (no us
 - Si ya existe un `rf-cu.md` parcial, se completa respetando lo ya definido.
 - Cada CU contiene dos proyecciones enlazadas: `Acciones para ejecución manual`, que alimenta Excel/Word y no expone selectores ni Cypress, y un `Contrato de automatización` estructurado que alimenta los tests. Una acción humana puede agrupar varias operaciones, pero cada operación conserva su selector, valor y evidencia independiente:
 - Toda acción manual indica el valor literal de cada campo: fecha, hora, número, texto y texto visible exacto de cada dropdown. Expresiones como «una opción disponible», «un valor válido» o «indicar la fecha y la hora» se rechazan. Datepicker, timepicker y textarea se registran técnicamente como `input`; `set-control` sólo admite `input`, `select` y `checkbox`.
+- El servidor extrae un inventario compacto de controles de todas las plantillas Angular y valida la cadena `frontend → contrato técnico → acción humana`. Un CU que pulse una acción de cálculo/consulta no puede omitir silenciosamente fecha, hora u otro control de su componente. En modo sampling se realizan hasta tres intentos de autocorrección antes de rechazar el documento.
 
 ```markdown
 - **CU-1: Cálculo nominal.**

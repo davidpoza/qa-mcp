@@ -6,7 +6,7 @@ import {
   automationContractErrors,
   extractOrBuildRfEntries,
   manualInstructions,
-  rfCuContractErrors,
+  rfCuContextContractErrors,
   technicalActionInstruction,
   technicalInstruction,
 } from "../rfcu";
@@ -64,8 +64,11 @@ function expandToCuUnits(entries: RfEntry[]): CuUnit[] {
   return units;
 }
 
-function requireRfCuInputActionContract(entries: RfEntry[]): void {
-  const errors = rfCuContractErrors(entries);
+async function requireRfCuInputActionContract(
+  context: LoadedContext,
+  entries: RfEntry[]
+): Promise<void> {
+  const errors = await rfCuContextContractErrors(context, entries);
   if (errors.length === 0) return;
   throw new Error(
     "rf-cu.md no mantiene un contrato coherente entre acciones humanas y automatización:\n- " +
@@ -2530,7 +2533,7 @@ export async function generateE2ETests(
       );
     }
   }
-  requireRfCuInputActionContract(entries);
+  await requireRfCuInputActionContract(context, entries);
 
   const files: string[] = [];
   const iterations: E2EIterationResult[] = [];
@@ -2931,7 +2934,7 @@ export async function prepareE2EFallback(
       );
     }
   }
-  requireRfCuInputActionContract(entries);
+  await requireRfCuInputActionContract(context, entries);
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
   const frontendRoot = requireFrontendRoot(context);
@@ -3248,7 +3251,7 @@ export async function runE2EFallback(
       );
     }
   }
-  requireRfCuInputActionContract(entries);
+  await requireRfCuInputActionContract(context, entries);
 
   const visitUrl = context.config.e2eBaseUrl ?? "/";
   const frontendRoot = requireFrontendRoot(context);

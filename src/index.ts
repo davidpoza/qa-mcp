@@ -464,7 +464,7 @@ function formatE2ERun(run: E2ERunFallbackResult, rfFilter?: string[]): string {
 registerToolCompat(
   server,
   "autoCompleteRfCu",
-  "SOLO edita/rellena o valida rf-cu.md. Cada CU separa `Acciones para ejecución manual` (sin selectores ni detalles Cypress) y un `Contrato de automatización` estructurado. Todo input, fecha, hora o dropdown debe mostrar su valor literal en la acción humana. Toda operación técnica referencia una acción humana y comparte sus etiquetas, valores y resultados; una acción humana puede agrupar varias operaciones atómicas. NO genera tests ni ejecuta Cypress. Si el cliente no soporta sampling, devuelve al agente el prompt completo integrado y exige una segunda llamada con validateOnly=true.",
+  "SOLO edita/rellena o valida rf-cu.md. Cada CU separa `Acciones para ejecución manual` (sin selectores ni detalles Cypress) y un `Contrato de automatización` estructurado. Todo input, fecha, hora o dropdown debe mostrar su valor literal en la acción humana. Contrasta los CU de cálculo/consulta con el inventario de controles extraído del frontend y autocorrige omisiones antes de escribir. Toda operación técnica referencia una acción humana y comparte sus etiquetas, valores y resultados; una acción humana puede agrupar varias operaciones atómicas. NO genera tests ni ejecuta Cypress. Si el cliente no soporta sampling, devuelve al agente el prompt completo integrado y exige una segunda llamada con validateOnly=true.",
   {
     requirementsPath: z.string().optional(),
     assisted: z.boolean().optional(),

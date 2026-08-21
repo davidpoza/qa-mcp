@@ -11,6 +11,11 @@ import {
   validateRfCuMarkdown,
 } from "./rfcu";
 import { CuAutomationOperation } from "./types";
+import {
+  extractFrontendControlsFromHtml,
+  formatFrontendControlInventory,
+  frontendControlCoverageErrors,
+} from "./frontend-controls";
 
 const validDocument = `# Requisitos funcionales
 
@@ -223,4 +228,32 @@ test("rechaza RF duplicados antes de persistir el documento", () => {
     () => validateRfCuMarkdown(`${validDocument}\n${validDocument}`),
     /RF duplicado: RF-2/
   );
+});
+
+test("detecta fecha y hora omitidas al contrastar el CU con su componente frontend", () => {
+  const landingDocument = validDocument
+    .replace("RF-2 — Datos operativos", "RF-2 — Cálculo de tasas de aterrizaje")
+    .replace(
+      "Comprobar que Importe total muestra el importe calculado.",
+      "Pulsar Calcular importe."
+    )
+    .replace(
+      /^    - `A03\.1`[^\n]*$/m,
+      "    - `A03.1` | acción `03` | operación `click` | etiqueta `Calcular importe` | selector `app-aterrizaje-transito empresas-ui-button`"
+    );
+  const controls = extractFrontendControlsFromHtml(
+    "src/app/aterrizaje-transito/aterrizaje-transito.component.html",
+    `
+      <empresas-ui-datepicker formControlName="fechaAterrizaje" label="Fecha de operación" required></empresas-ui-datepicker>
+      <empresas-ui-timepicker formControlName="horaAterrizaje" label="Hora de operación" required></empresas-ui-timepicker>
+    `,
+    "app-aterrizaje-transito"
+  );
+  const entries = parseRfCu(landingDocument);
+  const errors = frontendControlCoverageErrors(entries, controls);
+
+  assert.equal(controls.length, 2);
+  assert.match(formatFrontendControlInventory(controls), /tipo contrato `input`/);
+  assert.ok(errors.some((error) => /Fecha de operación/.test(error)));
+  assert.ok(errors.some((error) => /Hora de operación/.test(error)));
 });
